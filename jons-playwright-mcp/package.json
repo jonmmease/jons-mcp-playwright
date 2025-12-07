@@ -1,0 +1,33 @@
+{
+  "name": "jons-playwright-mcp",
+  "version": "0.1.0",
+  "description": "Enhanced Playwright MCP with snapshot filtering and additional tools",
+  "main": "src/index.js",
+  "bin": {
+    "jons-playwright-mcp": "cli.js"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "keywords": [
+    "playwright",
+    "mcp",
+    "model-context-protocol",
+    "accessibility",
+    "browser-automation"
+  ],
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@playwright/mcp": "^0.0.50",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
