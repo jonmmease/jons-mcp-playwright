@@ -173,6 +173,46 @@ export class EnhancedBackend {
   }
 
   /**
+   * Enhance error messages for common browser errors
+   * @param {Error} error - Original error
+   * @returns {Object} MCP error response with helpful message
+   */
+  _enhanceBrowserError(error) {
+    const message = error.message || String(error);
+
+    // Check for "Browser is already in use" error
+    if (message.includes('Browser is already in use') || message.includes('ProcessSingleton')) {
+      const profileDir = process.platform === 'darwin'
+        ? '~/Library/Caches/ms-playwright/mcp-chrome'
+        : process.platform === 'win32'
+          ? '%LOCALAPPDATA%/ms-playwright/mcp-chrome'
+          : '~/.cache/ms-playwright/mcp-chrome';
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Browser profile is locked. This usually happens after a crash or if another instance is running.
+
+**To fix:**
+1. Close any Chrome windows opened by Playwright MCP
+2. If no windows are open, delete the stale lock files:
+   \`rm -f ${profileDir}/Singleton*\`
+3. Or use \`--isolated\` flag to avoid persistent profiles entirely
+
+Original error: ${message}`,
+        }],
+        isError: true,
+      };
+    }
+
+    // Return generic error for other cases
+    return {
+      content: [{ type: 'text', text: message }],
+      isError: true,
+    };
+  }
+
+  /**
    * Call a tool
    * Intercepts browser_snapshot for filtering, handles new tools
    * @param {string} name - Tool name
@@ -208,8 +248,12 @@ export class EnhancedBackend {
       return this._handleSnapshotTool(name, args, progress);
     }
 
-    // Pass through to inner backend
-    return this._inner.callTool(name, args, progress);
+    // Pass through to inner backend with error enhancement
+    try {
+      return await this._inner.callTool(name, args, progress);
+    } catch (error) {
+      return this._enhanceBrowserError(error);
+    }
   }
 
   /**
