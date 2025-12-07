@@ -82,6 +82,33 @@ export class EnhancedBackend {
       tools = tools.filter(tool => !isDeveloperTool(tool.name));
     }
 
+    // Extend browser_snapshot schema with our additional parameters
+    const snapshotTool = tools.find(t => t.name === 'browser_snapshot');
+    if (snapshotTool && snapshotTool.inputSchema) {
+      snapshotTool.inputSchema = {
+        ...snapshotTool.inputSchema,
+        properties: {
+          ...snapshotTool.inputSchema.properties,
+          ref: {
+            type: 'string',
+            description: 'Element ref to use as the root of the snapshot. If provided, only the subtree under this element is returned, avoiding truncation of deeply nested content.',
+          },
+          maxDepth: {
+            type: 'number',
+            description: 'Maximum tree depth to include (default: 5). Set to a higher value to see deeper content, or null for no limit.',
+          },
+          listLimit: {
+            type: 'number',
+            description: 'Maximum number of items to include per list (default: 10). Truncated lists show "N more items".',
+          },
+          saveToFile: {
+            type: 'boolean',
+            description: 'If true, save snapshot to a temp file and return the path instead of inline content. Useful for large snapshots.',
+          },
+        },
+      };
+    }
+
     // Add our new tools
     for (const schema of NEW_TOOLS) {
       tools.push({
