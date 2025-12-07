@@ -6,8 +6,6 @@
  *   npx jons-mcp-playwright [options]
  *
  * Options:
- *   --max-depth=N              Maximum tree depth (default: 5, null for no limit)
- *   --list-limit=N             Maximum items per list (default: 10, null for no limit)
  *   --include-developer-tools  Include hidden developer/testing tools
  *   --adblock[=MODE]           Enable ad blocking (modes: ads, tracking, full, custom)
  *   --adblock-lists=URLS       Custom filter list URLs (comma-separated)
@@ -25,13 +23,7 @@ const args = process.argv.slice(2);
 const config = {};
 
 for (const arg of args) {
-  if (arg.startsWith('--max-depth=')) {
-    const value = arg.split('=')[1];
-    config.maxDepth = value === 'null' ? null : parseInt(value, 10);
-  } else if (arg.startsWith('--list-limit=')) {
-    const value = arg.split('=')[1];
-    config.listLimit = value === 'null' ? null : parseInt(value, 10);
-  } else if (arg === '--include-developer-tools') {
+  if (arg === '--include-developer-tools') {
     config.includeDeveloperTools = true;
   } else if (arg === '--adblock') {
     // --adblock with no value defaults to 'tracking' mode
@@ -69,8 +61,6 @@ Usage:
   npx jons-mcp-playwright [options]
 
 Options:
-  --max-depth=N              Maximum tree depth (default: 5, null for no limit)
-  --list-limit=N             Maximum items per list (default: 10, null for no limit)
   --include-developer-tools  Include hidden developer/testing tools
   --adblock[=MODE]           Enable ad blocking (default mode: tracking)
                              Modes: ads, tracking, full, custom, off

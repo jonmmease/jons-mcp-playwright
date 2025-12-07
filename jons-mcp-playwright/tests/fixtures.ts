@@ -94,12 +94,6 @@ export const test = baseTest.extend<TestFixtures, WorkerFixtures>({
 
       // Apply config options as CLI args
       if (options?.config) {
-        if (options.config.maxDepth !== undefined) {
-          args.push(`--max-depth=${options.config.maxDepth}`);
-        }
-        if (options.config.listLimit !== undefined) {
-          args.push(`--list-limit=${options.config.listLimit}`);
-        }
         if (options.config.includeDeveloperTools) {
           args.push('--include-developer-tools');
         }

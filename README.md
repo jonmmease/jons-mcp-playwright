@@ -32,9 +32,86 @@ This fork wraps the standard `@playwright/mcp` logic and adds filtering and new 
 - `--adblock-lists=URL` - Custom filter lists (comma-separated, for `custom` mode)
 
 **CLI Options** (for `jons-mcp-playwright` subproject):
-- `--max-depth=N` - Set default depth limit (use `null` for no limit)
-- `--list-limit=N` - Set default list limit (use `null` for no limit)
 - `--include-developer-tools` - Show hidden tools (tracing, locator generation, verification)
+
+### Using with Claude Code
+
+<details>
+<summary><b>From GitHub (recommended)</b></summary>
+
+Add directly from GitHub using npx:
+
+```bash
+claude mcp add jons-playwright -- npx --yes github:jonmmease/jons-mcp-playwright/jons-mcp-playwright
+```
+
+With ad blocking:
+
+```bash
+claude mcp add jons-playwright -- npx --yes github:jonmmease/jons-mcp-playwright/jons-mcp-playwright --adblock
+```
+
+</details>
+
+<details>
+<summary><b>From local directory</b></summary>
+
+If you've cloned the repository locally:
+
+```bash
+# First, install dependencies
+cd /path/to/jons-mcp-playwright/jons-mcp-playwright
+npm install
+
+# Add to Claude Code using absolute path
+claude mcp add jons-playwright -- node /path/to/jons-mcp-playwright/jons-mcp-playwright/cli.js
+```
+
+With ad blocking:
+
+```bash
+claude mcp add jons-playwright -- node /path/to/jons-mcp-playwright/jons-mcp-playwright/cli.js --adblock
+```
+
+</details>
+
+<details>
+<summary><b>Manual configuration</b></summary>
+
+Edit your Claude Code MCP settings file directly:
+
+**From GitHub:**
+```json
+{
+  "mcpServers": {
+    "jons-playwright": {
+      "command": "npx",
+      "args": [
+        "--yes",
+        "github:jonmmease/jons-mcp-playwright/jons-mcp-playwright",
+        "--adblock"
+      ]
+    }
+  }
+}
+```
+
+**From local directory:**
+```json
+{
+  "mcpServers": {
+    "jons-playwright": {
+      "command": "node",
+      "args": [
+        "/path/to/jons-mcp-playwright/jons-mcp-playwright/cli.js",
+        "--adblock"
+      ]
+    }
+  }
+}
+```
+
+</details>
 
 ---
 

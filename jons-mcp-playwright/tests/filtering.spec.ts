@@ -82,15 +82,15 @@ test.describe('Snapshot Filtering', () => {
     expect(yaml).toContain('more items');
   });
 
-  test('respects custom listLimit', async ({ startClient, server }) => {
+  test('respects custom listLimit via tool argument', async ({ client, server }) => {
     server.setRoute('/small-list', (req, res) => {
       const items = Array.from({ length: 10 }, (_, i) => `<li>Item ${i + 1}</li>`).join('');
       res.end(`<html><body><ul>${items}</ul></body></html>`);
     });
 
-    const { client } = await startClient({ config: { listLimit: 3 } });
     await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/small-list' } });
-    const response = await client.callTool({ name: 'browser_snapshot', arguments: {} });
+    // Pass listLimit as tool argument - LLM controls this per-call
+    const response = await client.callTool({ name: 'browser_snapshot', arguments: { listLimit: 3 } });
 
     const yaml = extractYaml(response);
     expect(yaml).toBeTruthy();
