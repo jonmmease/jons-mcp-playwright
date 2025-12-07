@@ -1,4 +1,43 @@
-## Playwright MCP
+## jons-mcp-playwright
+
+A fork of [@playwright/mcp](https://github.com/microsoft/playwright-mcp) optimized for **working with larger websites**. The standard Playwright MCP produces accessibility snapshots that can easily exceed 50,000+ tokens on complex pages, making LLM interactions expensive and slow. This fork adds filtering that typically reduces token usage while preserving the information needed for effective automation.
+
+### Why This Fork?
+
+The upstream Playwright MCP works great for simple pages, but larger websites (dashboards, data-heavy apps, complex UIs) produce accessibility trees that are:
+- **Too large** - Consuming excessive tokens and context window
+- **Missing conveniences** - No way to extract tables, images, or text directly
+
+This fork wraps the standard `@playwright/mcp` logic and adds filtering and new tools.
+
+### Fork Features
+
+**Snapshot Filtering** - The `browser_snapshot` tool truncates large trees:
+- **Depth limit** - Truncates deep nesting, showing "▶ deeper content" (default: 5 levels)
+- **List limit** - Truncates long lists/menus, showing "▶ N more items" (default: 10 items)
+- **Subtree extraction** - Pass `ref` parameter to focus on a specific element
+- **Per-call overrides** - Pass `maxDepth` / `listLimit` to override defaults
+- **File output** - Pass `saveToFile: true` to write to temp file instead of inline
+
+**New Tools**:
+- `browser_get_text` - Extract all text from an element (bypasses snapshot truncation)
+- `browser_get_table` - Extract table data as markdown
+- `browser_get_image` - Get image URL, dimensions, and alt text
+- `browser_fill_form` - Fill multiple form fields in one call
+- `browser_get_bounds` - Get element coordinates for vision-based workflows
+
+**CLI Options** (for `jons-mcp-playwright` subproject):
+- `--max-depth=N` - Set default depth limit (use `null` for no limit)
+- `--list-limit=N` - Set default list limit (use `null` for no limit)
+- `--include-developer-tools` - Show hidden tools (tracing, locator generation, verification)
+
+---
+
+## Upstream Playwright MCP
+
+Below is the documentation from the upstream project. This fork is compatible with all standard tools and options.
+
+---
 
 A Model Context Protocol (MCP) server that provides browser automation capabilities using [Playwright](https://playwright.dev). This server enables LLMs to interact with web pages through structured accessibility snapshots, bypassing the need for screenshots or visually-tuned models.
 
