@@ -202,7 +202,6 @@ export class EnhancedBackend {
     const filteredYaml = filterSnapshot(yamlSnapshot, {
       maxDepth: effectiveMaxDepth,
       listLimit: effectiveListLimit,
-      removeNoise: true,
     });
 
     // Calculate stats

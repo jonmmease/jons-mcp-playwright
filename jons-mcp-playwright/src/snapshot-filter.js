@@ -2,7 +2,6 @@
  * Snapshot filtering for accessibility trees
  *
  * Parses Playwright's YAML accessibility snapshots and applies filtering:
- * - Remove noise roles (generic, paragraph, presentation, etc.)
  * - Limit tree depth (maxDepth)
  * - Limit list items (listLimit)
  * - Support subtree extraction via ref
@@ -191,39 +190,6 @@ export function serializeSnapshot(tree, options = {}) {
   return lines.join('\n');
 }
 
-// Roles considered "noise" - usually removed unless they have interactive children
-const NOISE_ROLES = new Set([
-  'generic',
-  'paragraph',
-  'presentation',
-  'none',
-  'document',
-  'Section', // Sometimes appears as Section
-]);
-
-// Roles that are always interactive and should be preserved
-const INTERACTIVE_ROLES = new Set([
-  'button',
-  'link',
-  'textbox',
-  'checkbox',
-  'radio',
-  'combobox',
-  'listbox',
-  'menu',
-  'menuitem',
-  'menuitemcheckbox',
-  'menuitemradio',
-  'option',
-  'searchbox',
-  'slider',
-  'spinbutton',
-  'switch',
-  'tab',
-  'tabpanel',
-  'treeitem',
-]);
-
 // Roles that represent collapsible containers (for listLimit)
 const COLLAPSIBLE_ROLES = new Set([
   'list',
@@ -236,76 +202,6 @@ const COLLAPSIBLE_ROLES = new Set([
   'grid',
   'rowgroup',
 ]);
-
-/**
- * Check if a node has any interactive descendants
- * @param {Object} node - Tree node
- * @returns {boolean}
- */
-function hasInteractiveDescendants(node) {
-  if (!node.children || node.children.length === 0) {
-    return false;
-  }
-  for (const child of node.children) {
-    if (INTERACTIVE_ROLES.has(child.role)) {
-      return true;
-    }
-    if (hasInteractiveDescendants(child)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Filter noise roles from the tree, preserving structure for interactive elements
- * @param {Object} node - Tree node
- * @returns {Object|null} - Filtered node or null if should be removed
- */
-function filterNoiseNode(node) {
-  // Always keep root
-  if (node.role === 'root') {
-    const filteredChildren = [];
-    for (const child of node.children || []) {
-      const filtered = filterNoiseNode(child);
-      if (filtered) {
-        filteredChildren.push(filtered);
-      }
-    }
-    return { ...node, children: filteredChildren };
-  }
-
-  // Keep non-noise roles
-  if (!NOISE_ROLES.has(node.role)) {
-    const filteredChildren = [];
-    for (const child of node.children || []) {
-      const filtered = filterNoiseNode(child);
-      if (filtered) {
-        filteredChildren.push(filtered);
-      }
-    }
-    return { ...node, children: filteredChildren };
-  }
-
-  // For noise roles: preserve if has meaningful name or interactive descendants
-  const hasMeaningfulName = node.name && node.name.trim().length > 0;
-  const hasInteractive = hasInteractiveDescendants(node);
-
-  if (hasMeaningfulName || hasInteractive) {
-    const filteredChildren = [];
-    for (const child of node.children || []) {
-      const filtered = filterNoiseNode(child);
-      if (filtered) {
-        filteredChildren.push(filtered);
-      }
-    }
-    return { ...node, children: filteredChildren };
-  }
-
-  // For noise without meaning: collapse children up to parent
-  // This returns null but the children should be handled by parent
-  return null;
-}
 
 /**
  * Filter tree by maximum depth
@@ -422,21 +318,16 @@ function findNodeByRef(node, ref) {
  * @param {Object} options - Filter options
  * @param {number|null} options.maxDepth - Maximum tree depth (null for no limit)
  * @param {number|null} options.listLimit - Maximum items per list (null for no limit)
- * @param {boolean} options.removeNoise - Whether to remove noise roles (default: true)
  * @returns {string} - Filtered YAML string
  */
 export function filterSnapshot(yaml, options = {}) {
-  const { maxDepth = 5, listLimit = 10, removeNoise = true } = options;
+  const { maxDepth = 5, listLimit = 10 } = options;
 
   try {
     // Parse the YAML
     let tree = parseSnapshot(yaml);
 
-    // Apply filters in order
-    if (removeNoise) {
-      tree = filterNoiseNode(tree);
-    }
-
+    // Apply filters
     tree = filterByDepthNode(tree, maxDepth);
     tree = filterByListLimitNode(tree, listLimit);
 
