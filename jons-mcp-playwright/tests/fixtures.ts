@@ -103,6 +103,16 @@ export const test = baseTest.extend<TestFixtures, WorkerFixtures>({
         if (options.config.includeDeveloperTools) {
           args.push('--include-developer-tools');
         }
+        if (options.config.adblock !== undefined) {
+          if (options.config.adblock === true) {
+            args.push('--adblock');
+          } else if (typeof options.config.adblock === 'string') {
+            args.push(`--adblock=${options.config.adblock}`);
+          }
+        }
+        if (options.config.adblockLists) {
+          args.push(`--adblock-lists=${options.config.adblockLists}`);
+        }
       }
 
       const client = new Client({ name: 'test', version: '1.0.0' });

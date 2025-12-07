@@ -26,6 +26,11 @@ This fork wraps the standard `@playwright/mcp` logic and adds filtering and new 
 - `browser_fill_form` - Fill multiple form fields in one call
 - `browser_get_bounds` - Get element coordinates for vision-based workflows
 
+**Ad Blocking**:
+- `--adblock` - Enable ad and tracker blocking (uses EasyList + EasyPrivacy)
+- `--adblock=MODE` - Modes: `ads`, `tracking` (default), `full`, `custom`
+- `--adblock-lists=URL` - Custom filter lists (comma-separated, for `custom` mode)
+
 **CLI Options** (for `jons-mcp-playwright` subproject):
 - `--max-depth=N` - Set default depth limit (use `null` for no limit)
 - `--list-limit=N` - Set default list limit (use `null` for no limit)

@@ -7,7 +7,12 @@
  */
 
 import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
+import path from 'path';
 import { EnhancedBackend } from './enhanced-backend.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const require = createRequire(import.meta.url);
 
@@ -49,8 +54,25 @@ const DEFAULT_CONFIG = {
 export async function createConnection(config = {}, contextGetter) {
   const mergedConfig = { ...DEFAULT_CONFIG, ...config };
 
+  // Build Playwright config with optional adblock init-page
+  const playwrightConfig = { ...config.playwright };
+
+  // If adblock is enabled, add init-page
+  if (process.env.JONS_MCP_ADBLOCK_MODE && process.env.JONS_MCP_ADBLOCK !== 'off') {
+    const initPagePath = path.join(__dirname, 'adblocker', 'init-page.js');
+
+    // Ensure browser config exists
+    playwrightConfig.browser = playwrightConfig.browser || {};
+
+    // Merge with existing initPage entries
+    const existingInitPages = playwrightConfig.browser.initPage || [];
+    playwrightConfig.browser.initPage = Array.isArray(existingInitPages)
+      ? [initPagePath, ...existingInitPages]
+      : [initPagePath, existingInitPages];
+  }
+
   // Create the inner Playwright MCP server
-  const playwrightServer = await createPlaywrightConnection(config.playwright || {}, contextGetter);
+  const playwrightServer = await createPlaywrightConnection(playwrightConfig, contextGetter);
 
   // Create an in-process client to communicate with the Playwright server
   // Use Playwright's InProcessTransport for proper bidirectional communication

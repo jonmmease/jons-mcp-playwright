@@ -9,6 +9,8 @@
  *   --max-depth=N              Maximum tree depth (default: 5, null for no limit)
  *   --list-limit=N             Maximum items per list (default: 10, null for no limit)
  *   --include-developer-tools  Include hidden developer/testing tools
+ *   --adblock[=MODE]           Enable ad blocking (modes: ads, tracking, full, custom)
+ *   --adblock-lists=URLS       Custom filter list URLs (comma-separated)
  *   --playwright-*             Options passed through to Playwright MCP
  */
 
@@ -31,6 +33,27 @@ for (const arg of args) {
     config.listLimit = value === 'null' ? null : parseInt(value, 10);
   } else if (arg === '--include-developer-tools') {
     config.includeDeveloperTools = true;
+  } else if (arg === '--adblock') {
+    // --adblock with no value defaults to 'tracking' mode
+    config.adblock = 'tracking';
+    process.env.JONS_MCP_ADBLOCK_MODE = 'tracking';
+  } else if (arg.startsWith('--adblock=')) {
+    const mode = arg.split('=')[1];
+    const validModes = ['ads', 'tracking', 'full', 'custom', 'off'];
+    if (!validModes.includes(mode)) {
+      console.error(`Invalid adblock mode: ${mode}. Valid modes: ${validModes.join(', ')}`);
+      process.exit(1);
+    }
+    if (mode === 'off') {
+      process.env.JONS_MCP_ADBLOCK = 'off';
+    } else {
+      config.adblock = mode;
+      process.env.JONS_MCP_ADBLOCK_MODE = mode;
+    }
+  } else if (arg.startsWith('--adblock-lists=')) {
+    const lists = arg.split('=')[1];
+    config.adblockLists = lists;
+    process.env.JONS_MCP_ADBLOCK_LISTS = lists;
   } else if (arg.startsWith('--playwright-')) {
     // Pass through to Playwright (convert kebab-case to camelCase)
     const playwrightArg = arg.replace('--playwright-', '');
@@ -49,12 +72,17 @@ Options:
   --max-depth=N              Maximum tree depth (default: 5, null for no limit)
   --list-limit=N             Maximum items per list (default: 10, null for no limit)
   --include-developer-tools  Include hidden developer/testing tools
+  --adblock[=MODE]           Enable ad blocking (default mode: tracking)
+                             Modes: ads, tracking, full, custom, off
+  --adblock-lists=URLS       Custom filter list URLs (comma-separated)
+                             Only used with --adblock=custom
   --playwright-*             Options passed through to Playwright MCP
                              Examples: --playwright-browser=firefox
                                        --playwright-headless
 
 Environment Variables:
   PWMCP_DEBUG=1              Print debug output
+  JONS_MCP_ADBLOCK=off       Disable ad blocking at runtime
 `);
     process.exit(0);
   }

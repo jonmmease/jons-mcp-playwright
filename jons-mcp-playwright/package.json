@@ -20,7 +20,9 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@ghostery/adblocker-playwright": "^2.3.0",
     "@playwright/mcp": "^0.0.50",
+    "cross-fetch": "^4.0.0",
     "yaml": "^2.7.0"
   },
   "devDependencies": {

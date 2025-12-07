@@ -53,6 +53,27 @@ interface Config {
    */
   includeDeveloperTools?: boolean;
 
+  // ============ Ad Blocking ============
+
+  /**
+   * Enable ad and tracker blocking
+   * - true: Enable with 'tracking' mode (ads + tracking)
+   * - 'ads': Block ads only (EasyList)
+   * - 'tracking': Block ads and trackers (EasyList + EasyPrivacy)
+   * - 'full': Block ads, trackers, and annoyances
+   * - 'custom': Use custom filter lists (requires adblockLists)
+   * - 'off': Explicitly disable blocking
+   * @default undefined (disabled)
+   */
+  adblock?: boolean | 'ads' | 'tracking' | 'full' | 'custom' | 'off';
+
+  /**
+   * Custom filter list URLs for adblock 'custom' mode
+   * Comma-separated list of URLs to filter lists
+   * @example 'https://example.com/list1.txt,https://example.com/list2.txt'
+   */
+  adblockLists?: string;
+
   // ============ Playwright passthrough ============
 
   /**

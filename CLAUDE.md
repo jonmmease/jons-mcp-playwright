@@ -67,10 +67,11 @@ test('my test', async ({ client, server }) => {
 The `jons-mcp-playwright/` directory contains an enhanced wrapper around `@playwright/mcp` with additional features for LLM usage optimization.
 
 ### Features
-- **Snapshot Filtering**: Reduces token usage by 80%+ via depth truncation, list truncation, and noise removal
+- **Snapshot Filtering**: Reduces token usage by 80%+ via depth truncation and list truncation
 - **New Tools**: `browser_get_text`, `browser_get_table`, `browser_get_image`, `browser_fill_form`, `browser_get_bounds`
 - **Developer Tools Filtering**: Hides rarely-used tools by default
 - **saveToFile Parameter**: Save output to temp files instead of inline
+- **Ad Blocking**: Optional ad and tracker blocking via Ghostery's adblocker
 
 ### Commands
 ```bash
@@ -95,8 +96,29 @@ npx playwright test tests/validation.spec.ts
 
 ### CLI Options
 ```bash
-node cli.js --max-depth=5 --list-limit=10 --include-developer-tools
+node cli.js --max-depth=5 --list-limit=10 --include-developer-tools --adblock
 ```
+
+### Ad Blocking
+Enable ad and tracker blocking to reduce page load times and snapshot sizes:
+
+```bash
+# Enable with default mode (tracking = ads + trackers)
+node cli.js --adblock
+
+# Modes: ads, tracking, full, custom
+node cli.js --adblock=ads       # Ads only (EasyList)
+node cli.js --adblock=tracking  # Ads + trackers (default)
+node cli.js --adblock=full      # Ads + trackers + annoyances
+
+# Custom filter lists
+node cli.js --adblock=custom --adblock-lists=https://example.com/list.txt
+
+# Disable at runtime
+JONS_MCP_ADBLOCK=off node cli.js --adblock
+```
+
+Filter lists are cached for 24 hours in the OS temp directory.
 
 ## Contributing
 
