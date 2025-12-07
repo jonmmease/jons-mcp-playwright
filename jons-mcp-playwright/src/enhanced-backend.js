@@ -27,6 +27,31 @@ const DEVELOPER_TOOLS = [
   // browser_verify_* pattern
 ];
 
+// Default filtering values for snapshot-returning tools
+// Adjust these to control token usage vs detail tradeoff
+const DEFAULT_MAX_DEPTH = 5;
+const DEFAULT_LIST_LIMIT = 10;
+
+// Tools that return snapshots via setIncludeSnapshot() and should have filtering params
+const SNAPSHOT_TOOLS = new Set([
+  'browser_navigate',
+  'browser_navigate_back',
+  'browser_click',
+  'browser_type',
+  'browser_hover',
+  'browser_select_option',
+  'browser_drag',
+  'browser_press_key',
+  'browser_mouse_click_xy',
+  'browser_mouse_drag_xy',
+  'browser_file_upload',
+  'browser_handle_dialog',
+  'browser_evaluate',
+  'browser_wait_for',
+  'browser_run_code',
+  'browser_tabs',
+]);
+
 // Our new tool schemas
 const NEW_TOOLS = [
   getImageSchema,
@@ -109,6 +134,26 @@ export class EnhancedBackend {
       };
     }
 
+    // Extend all snapshot-returning tools with maxDepth and listLimit parameters
+    for (const tool of tools) {
+      if (SNAPSHOT_TOOLS.has(tool.name) && tool.inputSchema) {
+        tool.inputSchema = {
+          ...tool.inputSchema,
+          properties: {
+            ...tool.inputSchema.properties,
+            maxDepth: {
+              type: 'number',
+              description: `Maximum tree depth in returned snapshot (default: ${DEFAULT_MAX_DEPTH}). Set higher for more detail, or null for no limit.`,
+            },
+            listLimit: {
+              type: 'number',
+              description: `Maximum items per list in returned snapshot (default: ${DEFAULT_LIST_LIMIT}). Truncated lists show "N more items".`,
+            },
+          },
+        };
+      }
+    }
+
     // Add our new tools
     for (const schema of NEW_TOOLS) {
       tools.push({
@@ -156,6 +201,11 @@ export class EnhancedBackend {
     // Intercept browser_snapshot for filtering
     if (name === 'browser_snapshot') {
       return this._handleSnapshot(args, progress);
+    }
+
+    // Intercept all snapshot-returning tools for filtering
+    if (SNAPSHOT_TOOLS.has(name)) {
+      return this._handleSnapshotTool(name, args, progress);
     }
 
     // Pass through to inner backend
@@ -291,6 +341,91 @@ export class EnhancedBackend {
         type: 'text',
         text: response,
       }],
+    };
+  }
+
+  /**
+   * Handle snapshot-returning tools (navigate, click, type, etc.) with filtering
+   * @param {string} name - Tool name
+   * @param {Object} args - Tool arguments (may include maxDepth, listLimit)
+   * @param {Function} progress - Progress callback
+   * @returns {Promise<Object>} Filtered result
+   */
+  async _handleSnapshotTool(name, args, progress) {
+    const { maxDepth, listLimit, ...toolArgs } = args;
+
+    // Call inner backend with original args (minus our filter params)
+    const result = await this._inner.callTool(name, toolArgs, progress);
+
+    // If error or no content, return as-is
+    if (result.isError || !result.content) {
+      return result;
+    }
+
+    // Extract YAML snapshot from result
+    const yamlSnapshot = this._extractYamlFromResult(result);
+    if (!yamlSnapshot) {
+      // No snapshot in result, return original
+      return result;
+    }
+
+    // Determine effective filtering options
+    const effectiveMaxDepth = maxDepth !== undefined ? maxDepth : DEFAULT_MAX_DEPTH;
+    const effectiveListLimit = listLimit !== undefined ? listLimit : DEFAULT_LIST_LIMIT;
+
+    // Apply filtering
+    const filteredYaml = filterSnapshot(yamlSnapshot, {
+      maxDepth: effectiveMaxDepth,
+      listLimit: effectiveListLimit,
+    });
+
+    // Check for truncation
+    const hasDepthTruncation = filteredYaml.includes('▶ deeper content');
+    const hasListTruncation = /▶ \d+ more items/.test(filteredYaml);
+
+    // Build the filtered response
+    let responseText = `\`\`\`yaml\n${filteredYaml}\n\`\`\``;
+
+    // Add guidance if truncation occurred
+    if (hasDepthTruncation || hasListTruncation) {
+      const hints = [];
+
+      if (hasDepthTruncation) {
+        hints.push(`- Use \`browser_snapshot(ref=...)\` to focus on a specific element's subtree`);
+        hints.push(`- Or increase \`maxDepth\` parameter (current: ${effectiveMaxDepth})`);
+      }
+
+      if (hasListTruncation) {
+        hints.push(`- Increase \`listLimit\` parameter (current: ${effectiveListLimit})`);
+      }
+
+      responseText += `\n\n**Note:** Some content was truncated. To see more:\n${hints.join('\n')}`;
+    }
+
+    // Replace the YAML in the original response with filtered version
+    // Preserve any non-YAML content (like code generation hints)
+    const newContent = result.content.map(part => {
+      if (part.type === 'text' && part.text) {
+        // Replace the YAML code block
+        const replaced = part.text.replace(
+          /```yaml\s*\n[\s\S]*?\n?```/,
+          responseText
+        );
+        // If replacement happened, return it
+        if (replaced !== part.text) {
+          return { type: 'text', text: replaced };
+        }
+        // If no code block found but starts with dash (raw YAML), replace entirely
+        if (part.text.trim().startsWith('-')) {
+          return { type: 'text', text: responseText };
+        }
+      }
+      return part;
+    });
+
+    return {
+      content: newContent,
+      isError: result.isError,
     };
   }
 
