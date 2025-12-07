@@ -241,88 +241,6 @@ test.describe('browser_get_image', () => {
   });
 });
 
-test.describe('browser_fill_form', () => {
-  test('fills multiple form fields', async ({ client, server }) => {
-    server.setRoute('/form', (req, res) => {
-      res.end(`
-        <html><body>
-          <form>
-            <input type="text" id="name" placeholder="Name">
-            <input type="email" id="email" placeholder="Email">
-            <button type="submit">Submit</button>
-          </form>
-        </body></html>
-      `);
-    });
-
-    await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/form' } });
-
-    // Get snapshot to find refs
-    const snapshotResponse = await client.callTool({ name: 'browser_snapshot', arguments: {} });
-    const text = snapshotResponse.content[0].text;
-
-    // Find refs for the two text inputs
-    const refMatches = [...text.matchAll(/textbox[^\]]*\[ref=([^\]]+)\]/g)];
-    expect(refMatches.length).toBeGreaterThanOrEqual(2);
-
-    const response = await client.callTool({
-      name: 'browser_fill_form',
-      arguments: {
-        fields: [
-          { ref: refMatches[0][1], value: 'John Doe' },
-          { ref: refMatches[1][1], value: 'john@example.com' },
-        ],
-      },
-    });
-
-    expect(response.isError).toBeFalsy();
-    expect(response.content[0].text).toContain('Filled 2/2');
-  });
-
-  test('reports results for invalid refs', async ({ client, server }) => {
-    server.setRoute('/partial', (req, res) => {
-      res.end(`
-        <html><body>
-          <input type="text" id="valid" placeholder="Valid">
-        </body></html>
-      `);
-    });
-
-    await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/partial' } });
-
-    // Get snapshot to find ref
-    const snapshotResponse = await client.callTool({ name: 'browser_snapshot', arguments: {} });
-    const snapshotText = snapshotResponse.content[0].text;
-    const refMatch = snapshotText.match(/textbox[^\]]*\[ref=([^\]]+)\]/);
-    expect(refMatch).toBeTruthy();
-
-    const response = await client.callTool({
-      name: 'browser_fill_form',
-      arguments: {
-        fields: [
-          { ref: refMatch![1], value: 'Valid Value' },
-          { ref: 'invalid-ref', value: 'Invalid' },
-        ],
-      },
-    });
-
-    // Check that the response mentions both refs
-    const text = response.content[0].text;
-    expect(text).toContain('Filled');
-    expect(text).toContain(refMatch![1]);
-  });
-
-  test('requires non-empty fields array', async ({ client }) => {
-    const response = await client.callTool({
-      name: 'browser_fill_form',
-      arguments: { fields: [] },
-    });
-
-    expect(response.isError).toBe(true);
-    expect(response.content[0].text).toContain('non-empty fields array');
-  });
-});
-
 test.describe('Developer Tools Filtering', () => {
   test('hides developer tools by default', async ({ client }) => {
     const tools = await client.listTools();
@@ -355,7 +273,6 @@ test.describe('Developer Tools Filtering', () => {
     expect(toolNames).toContain('browser_get_image');
     expect(toolNames).toContain('browser_get_text');
     expect(toolNames).toContain('browser_get_table');
-    expect(toolNames).toContain('browser_fill_form');
     expect(toolNames).toContain('browser_get_bounds');
   });
 

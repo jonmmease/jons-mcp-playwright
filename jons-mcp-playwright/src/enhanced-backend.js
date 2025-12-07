@@ -11,7 +11,6 @@
 import { schema as getImageSchema } from './tools/get-image.js';
 import { schema as getTextSchema } from './tools/get-text.js';
 import { schema as getTableSchema } from './tools/get-table.js';
-import { schema as fillFormSchema } from './tools/fill-form.js';
 import { schema as getBoundsSchema } from './tools/get-bounds.js';
 import { filterSnapshot, extractSubtree, estimateTokens, parseSnapshot, countElements } from './snapshot-filter.js';
 import { SnapshotCache } from './snapshot-cache.js';
@@ -57,7 +56,6 @@ const NEW_TOOLS = [
   getImageSchema,
   getTextSchema,
   getTableSchema,
-  fillFormSchema,
   getBoundsSchema,
 ];
 
@@ -162,8 +160,7 @@ export class EnhancedBackend {
         inputSchema: schema.inputSchema,
         annotations: {
           title: schema.name.replace('browser_', '').replace(/_/g, ' '),
-          readOnlyHint: schema.name !== 'browser_fill_form',
-          destructiveHint: schema.name === 'browser_fill_form',
+          readOnlyHint: true,
           openWorldHint: true,
         },
       });
@@ -230,9 +227,6 @@ Original error: ${message}`,
     }
     if (name === 'browser_get_table') {
       return this._handleGetTable(args);
-    }
-    if (name === 'browser_fill_form') {
-      return this._handleFillForm(args);
     }
     if (name === 'browser_get_bounds') {
       return this._handleGetBounds(args);
@@ -816,80 +810,6 @@ To download this image, use browser_navigate to go to the URL or use the URL in 
         type: 'text',
         text: `Table (${rows.length} rows):\n\n${markdown}`,
       }],
-    };
-  }
-
-  /**
-   * Handle browser_fill_form tool
-   * @param {Object} args - { fields: [{ ref, value }] }
-   * @returns {Promise<Object>} Fill results
-   */
-  async _handleFillForm(args) {
-    const { fields } = args;
-
-    if (!fields || !Array.isArray(fields) || fields.length === 0) {
-      return {
-        content: [{ type: 'text', text: 'browser_fill_form requires a non-empty fields array' }],
-        isError: true,
-      };
-    }
-
-    const filled = [];
-    const failed = [];
-
-    for (const field of fields) {
-      const { ref, value } = field;
-
-      if (!ref) {
-        failed.push({ ref: '(missing)', error: 'ref is required' });
-        continue;
-      }
-
-      try {
-        if (typeof value === 'boolean') {
-          // For checkboxes: check or uncheck
-          await this._inner.callTool('browser_evaluate', {
-            ref,
-            element: 'checkbox',
-            function: `(element, shouldCheck) => {
-              if (element.type === 'checkbox' || element.type === 'radio') {
-                element.checked = shouldCheck;
-                element.dispatchEvent(new Event('change', { bubbles: true }));
-              } else {
-                throw new Error('Element is not a checkbox or radio');
-              }
-            }`,
-          });
-          filled.push(ref);
-        } else {
-          // For text inputs: use browser_type through click + type
-          // First clear, then type
-          await this._inner.callTool('browser_click', {
-            ref,
-            element: 'form field',
-          });
-          await this._inner.callTool('browser_type', {
-            text: String(value),
-            submit: false,
-          });
-          filled.push(ref);
-        }
-      } catch (error) {
-        failed.push({ ref, error: error.message || 'Unknown error' });
-      }
-    }
-
-    let resultText = `Filled ${filled.length}/${fields.length} fields.`;
-    if (filled.length > 0) {
-      resultText += `\n\nFilled: ${filled.join(', ')}`;
-    }
-    if (failed.length > 0) {
-      resultText += `\n\nFailed:\n${failed.map(f => `- ${f.ref}: ${f.error}`).join('\n')}`;
-    }
-
-    return {
-      content: [{ type: 'text', text: resultText }],
-      isError: failed.length > 0 && filled.length === 0,
     };
   }
 
