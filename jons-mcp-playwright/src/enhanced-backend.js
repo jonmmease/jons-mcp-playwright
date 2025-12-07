@@ -259,11 +259,32 @@ export class EnhancedBackend {
       }
     }
 
-    // Return filtered snapshot inline
+    // Check for truncation and build response
+    const hasDepthTruncation = filteredYaml.includes('▶ deeper content');
+    const hasListTruncation = /▶ \d+ more items/.test(filteredYaml);
+
+    let response = `\`\`\`yaml\n${filteredYaml}\n\`\`\``;
+
+    // Add guidance if truncation occurred
+    if (hasDepthTruncation || hasListTruncation) {
+      const hints = [];
+
+      if (hasDepthTruncation) {
+        hints.push(`- Increase \`maxDepth\` (current: ${effectiveMaxDepth}) to see nested content`);
+        hints.push(`- Use \`ref\` parameter to focus on a specific element's subtree`);
+      }
+
+      if (hasListTruncation) {
+        hints.push(`- Increase \`listLimit\` (current: ${effectiveListLimit}) to see more list items`);
+      }
+
+      response += `\n\n**Note:** Some content was truncated (indicated by ▶). To see more:\n${hints.join('\n')}`;
+    }
+
     return {
       content: [{
         type: 'text',
-        text: `\`\`\`yaml\n${filteredYaml}\n\`\`\``,
+        text: response,
       }],
     };
   }
