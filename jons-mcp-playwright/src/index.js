@@ -71,6 +71,12 @@ export async function createConnection(config = {}, contextGetter) {
       : [initPagePath, existingInitPages];
   }
 
+  // Enable all capabilities by default (vision for coordinate tools, pdf for PDF handling)
+  // This exposes browser_mouse_click_xy, browser_mouse_move_xy, browser_mouse_drag_xy
+  if (!playwrightConfig.capabilities) {
+    playwrightConfig.capabilities = ['vision', 'pdf'];
+  }
+
   // Create the inner Playwright MCP server
   const playwrightServer = await createPlaywrightConnection(playwrightConfig, contextGetter);
 
