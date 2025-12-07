@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * CLI entry point for jons-playwright-mcp
+ * CLI entry point for jons-mcp-playwright
  *
  * Usage:
- *   npx jons-playwright-mcp [options]
+ *   npx jons-mcp-playwright [options]
  *
  * Options:
  *   --max-depth=N              Maximum tree depth (default: 5, null for no limit)
@@ -40,10 +40,10 @@ for (const arg of args) {
     config.playwright[camelKey] = value || true;
   } else if (arg === '--help' || arg === '-h') {
     console.log(`
-jons-playwright-mcp - Enhanced Playwright MCP with snapshot filtering
+jons-mcp-playwright - Enhanced Playwright MCP with snapshot filtering
 
 Usage:
-  npx jons-playwright-mcp [options]
+  npx jons-mcp-playwright [options]
 
 Options:
   --max-depth=N              Maximum tree depth (default: 5, null for no limit)
@@ -80,7 +80,7 @@ async function main() {
       process.exit(0);
     });
   } catch (error) {
-    console.error('Failed to start jons-playwright-mcp:', error);
+    console.error('Failed to start jons-mcp-playwright:', error);
     process.exit(1);
   }
 }

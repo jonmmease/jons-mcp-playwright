@@ -62,9 +62,9 @@ test('my test', async ({ client, server }) => {
 - `PWMCP_DEBUG=1` - Print MCP server stderr during tests
 - `MCP_IN_DOCKER=1` - Run tests in Docker mode
 
-## jons-playwright-mcp Subproject
+## jons-mcp-playwright Subproject
 
-The `jons-playwright-mcp/` directory contains an enhanced wrapper around `@playwright/mcp` with additional features for LLM usage optimization.
+The `jons-mcp-playwright/` directory contains an enhanced wrapper around `@playwright/mcp` with additional features for LLM usage optimization.
 
 ### Features
 - **Snapshot Filtering**: Reduces token usage by 80%+ via depth truncation, list truncation, and noise removal
@@ -74,7 +74,7 @@ The `jons-playwright-mcp/` directory contains an enhanced wrapper around `@playw
 
 ### Commands
 ```bash
-cd jons-playwright-mcp
+cd jons-mcp-playwright
 
 # Run all tests
 npx playwright test

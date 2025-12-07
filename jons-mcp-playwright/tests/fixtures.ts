@@ -1,5 +1,5 @@
 /**
- * Test fixtures for jons-playwright-mcp
+ * Test fixtures for jons-mcp-playwright
  */
 
 import path from 'path';

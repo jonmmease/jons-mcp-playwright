@@ -1,10 +1,10 @@
 {
-  "name": "jons-playwright-mcp",
+  "name": "jons-mcp-playwright",
   "version": "0.1.0",
   "description": "Enhanced Playwright MCP with snapshot filtering and additional tools",
   "main": "src/index.js",
   "bin": {
-    "jons-playwright-mcp": "cli.js"
+    "jons-mcp-playwright": "cli.js"
   },
   "type": "module",
   "scripts": {

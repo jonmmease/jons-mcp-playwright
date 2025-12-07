@@ -1,5 +1,5 @@
 /**
- * jons-playwright-mcp configuration
+ * jons-mcp-playwright configuration
  * Simple filtering options; Playwright options passed through
  */
 interface Config {

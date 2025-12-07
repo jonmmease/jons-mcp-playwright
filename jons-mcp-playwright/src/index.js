@@ -1,9 +1,9 @@
 /**
- * jons-playwright-mcp
+ * jons-mcp-playwright
  *
  * Enhanced Playwright MCP with snapshot filtering and additional tools.
  *
- * @module jons-playwright-mcp
+ * @module jons-mcp-playwright
  */
 
 import { createRequire } from 'module';
@@ -56,7 +56,7 @@ export async function createConnection(config = {}, contextGetter) {
   // Use Playwright's InProcessTransport for proper bidirectional communication
   const transport = new mcpSdk.InProcessTransport(playwrightServer);
 
-  const client = new mcpBundle.Client({ name: 'jons-playwright-mcp-proxy', version: '0.1.0' });
+  const client = new mcpBundle.Client({ name: 'jons-mcp-playwright-proxy', version: '0.1.0' });
   await client.connect(transport);
   await client.ping(); // Ensure connection is established
 
@@ -81,7 +81,7 @@ export async function createConnection(config = {}, contextGetter) {
 
   // Create and return the MCP server
   return mcpSdk.createServer(
-    'jons-playwright-mcp',
+    'jons-mcp-playwright',
     '0.1.0',
     enhancedBackend,
     false
