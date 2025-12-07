@@ -269,13 +269,18 @@ export class EnhancedBackend {
     if (hasDepthTruncation || hasListTruncation) {
       const hints = [];
 
+      // Recommend ref parameter first (doesn't increase result size)
       if (hasDepthTruncation) {
-        hints.push(`- Increase \`maxDepth\` (current: ${effectiveMaxDepth}) to see nested content`);
-        hints.push(`- Use \`ref\` parameter to focus on a specific element's subtree`);
+        hints.push(`- **Recommended:** Use \`ref\` parameter to focus on a specific element's subtree`);
+      }
+
+      // Other options with warnings about increased size
+      if (hasDepthTruncation) {
+        hints.push(`- Increase \`maxDepth\` (current: ${effectiveMaxDepth}) — warning: increases result size`);
       }
 
       if (hasListTruncation) {
-        hints.push(`- Increase \`listLimit\` (current: ${effectiveListLimit}) to see more list items`);
+        hints.push(`- Increase \`listLimit\` (current: ${effectiveListLimit}) — warning: increases result size`);
       }
 
       response += `\n\n**Note:** Some content was truncated (indicated by ▶). To see more:\n${hints.join('\n')}`;
