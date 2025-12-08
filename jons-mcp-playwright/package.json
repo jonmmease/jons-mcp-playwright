@@ -23,6 +23,7 @@
     "@ghostery/adblocker-playwright": "^2.3.0",
     "@ngrok/ngrok": "^1.6.0",
     "@playwright/mcp": "^0.0.50",
+    "busboy": "^1.6.0",
     "cross-fetch": "^4.0.0",
     "yaml": "^2.7.0"
   },
