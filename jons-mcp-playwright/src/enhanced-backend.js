@@ -8,6 +8,7 @@
  * - Filter out developer tools by default
  */
 
+import path from 'path';
 import { schema as getImageSchema } from './tools/get-image.js';
 import { schema as getTextSchema } from './tools/get-text.js';
 import { schema as getTableSchema } from './tools/get-table.js';
@@ -16,6 +17,7 @@ import { highlightSchema, clearHighlightsSchema } from './tools/highlight.js';
 import { filterSnapshot, extractSubtree, estimateTokens, parseSnapshot, countElements } from './snapshot-filter.js';
 import { SnapshotCache } from './snapshot-cache.js';
 import { saveToFile } from './utils/file-output.js';
+import { NgrokManager } from './utils/ngrok-manager.js';
 
 // Developer tools hidden by default (see design.md)
 const DEVELOPER_TOOLS = [
@@ -107,6 +109,7 @@ export class EnhancedBackend {
     this._snapshotCache = new SnapshotCache(5000); // 5 second TTL
     this._activeHighlights = []; // Track highlighted elements for cleanup
     this._highlightStylesInjected = false; // Track if CSS has been injected
+    this._ngrokManager = null; // Lazy-initialized ngrok manager for serving downloads
   }
 
   /**
@@ -246,24 +249,32 @@ Original error: ${message}`,
    * @returns {Promise<Object>} Tool result
    */
   async callTool(name, args = {}, progress) {
+    let result;
+
     // Handle our new tools
     if (name === 'browser_get_image') {
-      return this._handleGetImage(args);
+      result = await this._handleGetImage(args);
+      return this._postProcessResult(result);
     }
     if (name === 'browser_get_text') {
-      return this._handleGetText(args);
+      result = await this._handleGetText(args);
+      return this._postProcessResult(result);
     }
     if (name === 'browser_get_table') {
-      return this._handleGetTable(args);
+      result = await this._handleGetTable(args);
+      return this._postProcessResult(result);
     }
     if (name === 'browser_get_bounds') {
-      return this._handleGetBounds(args);
+      result = await this._handleGetBounds(args);
+      return this._postProcessResult(result);
     }
     if (name === 'browser_highlight') {
-      return this._handleHighlight(args);
+      result = await this._handleHighlight(args);
+      return this._postProcessResult(result);
     }
     if (name === 'browser_clear_highlights') {
-      return this._handleClearHighlights();
+      result = await this._handleClearHighlights();
+      return this._postProcessResult(result);
     }
 
     // Auto-clear highlights before browser actions that indicate user is moving on
@@ -273,17 +284,20 @@ Original error: ${message}`,
 
     // Intercept browser_snapshot for filtering
     if (name === 'browser_snapshot') {
-      return this._handleSnapshot(args, progress);
+      result = await this._handleSnapshot(args, progress);
+      return this._postProcessResult(result);
     }
 
     // Intercept all snapshot-returning tools for filtering
     if (SNAPSHOT_TOOLS.has(name)) {
-      return this._handleSnapshotTool(name, args, progress);
+      result = await this._handleSnapshotTool(name, args, progress);
+      return this._postProcessResult(result);
     }
 
     // Pass through to inner backend with error enhancement
     try {
-      return await this._inner.callTool(name, args, progress);
+      result = await this._inner.callTool(name, args, progress);
+      return this._postProcessResult(result);
     } catch (error) {
       return this._enhanceBrowserError(error);
     }
@@ -1257,9 +1271,121 @@ To download this image, use browser_navigate to go to the URL or use the URL in 
   }
 
   /**
+   * Ensure NgrokManager is initialized (lazy)
+   * @returns {Promise<NgrokManager>}
+   */
+  async _ensureNgrokManager() {
+    if (!this._ngrokManager) {
+      this._ngrokManager = new NgrokManager({
+        tempDir: this.config.tempDir,
+      });
+    }
+    if (!this._ngrokManager.isRunning) {
+      await this._ngrokManager.ensureRunning();
+    }
+    return this._ngrokManager;
+  }
+
+  /**
+   * Post-process tool results to replace local file paths with ngrok URLs
+   * @param {Object} result - Tool result from callTool
+   * @returns {Promise<Object>} Modified result with ngrok URLs
+   */
+  async _postProcessResult(result) {
+    // Skip if ngrok is not enabled
+    if (!this.config.ngrok) {
+      return result;
+    }
+
+    // Skip if result is empty or an error
+    if (!result || !result.content || result.isError) {
+      return result;
+    }
+
+    // Find text content to process
+    const textPart = result.content.find(part => part.type === 'text' && part.text);
+    if (!textPart) {
+      return result;
+    }
+
+    let text = textPart.text;
+    let modified = false;
+
+    // Regex patterns for detecting download paths:
+    // 1. Browser download format: "- Downloaded file X to /path/to/file"
+    const browserDownloadRegex = /^- Downloaded file (.+) to (.+)$/gm;
+    // 2. SaveToFile format: "Path: /path/to/file" or "saved to: /path/to/file"
+    const saveToFileRegex = /(?:Path:|saved to:|Saved to:|Snapshot saved to file\.\s*\n\s*Path:)\s*(.+)$/gm;
+
+    // Collect all paths to process
+    const pathsToProcess = [];
+
+    // Find browser download paths
+    let match;
+    while ((match = browserDownloadRegex.exec(text)) !== null) {
+      const filename = match[1];
+      const localPath = match[2];
+      pathsToProcess.push({ localPath, filename, fullMatch: match[0], type: 'download' });
+    }
+
+    // Find saveToFile paths
+    browserDownloadRegex.lastIndex = 0; // Reset regex
+    while ((match = saveToFileRegex.exec(text)) !== null) {
+      const localPath = match[1].trim();
+      const filename = path.basename(localPath);
+      pathsToProcess.push({ localPath, filename, fullMatch: match[0], type: 'savefile' });
+    }
+
+    // If no paths found, return original result
+    if (pathsToProcess.length === 0) {
+      return result;
+    }
+
+    // Initialize ngrok manager (lazy)
+    const ngrok = await this._ensureNgrokManager();
+
+    // Process each path and replace in text
+    for (const { localPath, filename, fullMatch, type } of pathsToProcess) {
+      const { publicUrl } = ngrok.registerDownload(localPath, filename);
+
+      if (type === 'download') {
+        // Replace "- Downloaded file X to /local/path" with just the ngrok URL
+        const newText = `- Downloaded file ${filename}\n  Download URL: ${publicUrl}`;
+        text = text.replace(fullMatch, newText);
+        modified = true;
+      } else if (type === 'savefile') {
+        // Replace local path with ngrok URL
+        text = text.replace(fullMatch, fullMatch.replace(localPath, publicUrl));
+        modified = true;
+      }
+    }
+
+    if (!modified) {
+      return result;
+    }
+
+    // Return modified result
+    return {
+      ...result,
+      content: result.content.map(part => {
+        if (part === textPart) {
+          return { ...part, text };
+        }
+        return part;
+      }),
+    };
+  }
+
+  /**
    * Called when the server is closed
    */
-  serverClosed() {
+  async serverClosed() {
+    // Clean up ngrok manager
+    if (this._ngrokManager) {
+      await this._ngrokManager.stop();
+      this._ngrokManager = null;
+    }
+
     if (this._inner.serverClosed) {
       this._inner.serverClosed();
     }

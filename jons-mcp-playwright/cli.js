@@ -46,6 +46,8 @@ for (const arg of args) {
     const lists = arg.split('=')[1];
     config.adblockLists = lists;
     process.env.JONS_MCP_ADBLOCK_LISTS = lists;
+  } else if (arg === '--ngrok') {
+    config.ngrok = true;
   } else if (arg.startsWith('--playwright-')) {
     // Pass through to Playwright (convert kebab-case to camelCase)
     const playwrightArg = arg.replace('--playwright-', '');
@@ -69,6 +71,7 @@ Options:
   --playwright-*             Options passed through to Playwright MCP
                              Examples: --playwright-browser=firefox
                                        --playwright-headless
+  --ngrok                  Serve downloads via ngrok tunnel (requires NGROK_AUTHTOKEN)
 
 Environment Variables:
   PWMCP_DEBUG=1              Print debug output
@@ -76,6 +79,19 @@ Environment Variables:
 `);
     process.exit(0);
   }
+}
+
+// Validate ngrok configuration
+if (config.ngrok && !process.env.NGROK_AUTHTOKEN) {
+  console.error(`Error: --ngrok requires NGROK_AUTHTOKEN environment variable.
+
+To set up ngrok:
+1. Create a free account at https://dashboard.ngrok.com
+2. Get your authtoken from https://dashboard.ngrok.com/get-started/your-authtoken
+3. Set the environment variable:
+   export NGROK_AUTHTOKEN=your_token_here
+`);
+  process.exit(1);
 }
 
 async function main() {
