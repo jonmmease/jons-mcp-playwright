@@ -72,6 +72,20 @@ export async function createConnection(config = {}, contextGetter) {
       : [initPagePath, existingInitPages];
   }
 
+  // If visual feedback is enabled (default: on), add init-page
+  if (process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+    const visualFeedbackPath = path.join(__dirname, 'visual-feedback', 'init-page.js');
+
+    // Ensure browser config exists
+    playwrightConfig.browser = playwrightConfig.browser || {};
+
+    // Merge with existing initPage entries
+    const existingInitPages = playwrightConfig.browser.initPage || [];
+    playwrightConfig.browser.initPage = Array.isArray(existingInitPages)
+      ? [visualFeedbackPath, ...existingInitPages]
+      : [visualFeedbackPath, existingInitPages];
+  }
+
   // Add Chrome flags to suppress "Restore pages?" dialog after crash/unclean shutdown
   // This prevents the crash recovery bubble from appearing when the browser process
   // was killed without graceful shutdown (e.g., from lock clearing or Ctrl+C)

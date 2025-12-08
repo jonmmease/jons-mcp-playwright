@@ -20,6 +20,24 @@ import { SnapshotCache } from './snapshot-cache.js';
 import { saveToFile } from './utils/file-output.js';
 import { NgrokManager } from './utils/ngrok-manager.js';
 
+// Mouse tools that should trigger visual feedback
+const MOUSE_CLICK_TOOLS = new Set([
+  'browser_click',
+  'browser_mouse_click_xy',
+]);
+
+const MOUSE_MOVE_TOOLS = new Set([
+  'browser_hover',
+  'browser_mouse_move_xy',
+  'browser_mouse_drag_xy',
+]);
+
+// Keyboard tools that should trigger keystroke HUD
+const KEYBOARD_TOOLS = new Set([
+  'browser_type',
+  'browser_press_key',
+]);
+
 // Developer tools hidden by default (see design.md)
 const DEVELOPER_TOOLS = [
   'browser_install',
@@ -185,6 +203,21 @@ export class EnhancedBackend {
       }
     }
 
+    // Extend browser_take_screenshot with showCursor parameter
+    const screenshotTool = tools.find(t => t.name === 'browser_take_screenshot');
+    if (screenshotTool && screenshotTool.inputSchema) {
+      screenshotTool.inputSchema = {
+        ...screenshotTool.inputSchema,
+        properties: {
+          ...screenshotTool.inputSchema.properties,
+          showCursor: {
+            type: 'boolean',
+            description: 'If true, include the visual feedback cursor in the screenshot. Default: false (clean screenshots). Useful for debugging click positions.',
+          },
+        },
+      };
+    }
+
     // Extend browser_file_upload with fileTokens parameter
     const fileUploadTool = tools.find(t => t.name === 'browser_file_upload');
     if (fileUploadTool && fileUploadTool.inputSchema) {
@@ -262,6 +295,190 @@ Original error: ${message}`,
   }
 
   /**
+   * Show visual feedback (cursor movement, click, keystroke)
+   * @param {'moveCursor'|'showClick'|'showKey'|'showText'} type - Feedback type
+   * @param {Object} params - Parameters for the feedback
+   * @returns {Promise<void>}
+   */
+  async _showVisualFeedback(type, params) {
+    // Skip if visual feedback is disabled
+    if (process.env.JONS_MCP_SHOW_ACTIONS === 'off') {
+      return;
+    }
+
+    try {
+      let code;
+      switch (type) {
+        case 'moveCursor':
+          code = `window.__mcpVisualFeedback?.moveCursor(${params.x}, ${params.y})`;
+          break;
+        case 'showClick':
+          code = `window.__mcpVisualFeedback?.showClick(${params.x}, ${params.y})`;
+          break;
+        case 'showKey':
+          // Escape the key for safe embedding in JS string
+          const escapedKey = params.key.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+          code = `window.__mcpVisualFeedback?.showKey('${escapedKey}')`;
+          break;
+        case 'showText':
+          // Escape the text for safe embedding in JS string
+          const escapedText = params.text.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+          code = `window.__mcpVisualFeedback?.showText('${escapedText}')`;
+          break;
+        default:
+          return;
+      }
+
+      await this._inner.callTool('browser_evaluate', { function: `() => { ${code} }` });
+    } catch (error) {
+      // Silently ignore errors - visual feedback is non-critical
+      // This can fail if page navigated, iframe context, etc.
+    }
+  }
+
+  /**
+   * Get element coordinates for visual feedback
+   * @param {string} ref - Element reference
+   * @returns {Promise<{x: number, y: number}|null>}
+   */
+  async _getElementCenter(ref) {
+    try {
+      const result = await this._inner.callTool('browser_evaluate', {
+        ref,
+        element: 'target element',
+        function: `(element) => {
+          const rect = element.getBoundingClientRect();
+          return JSON.stringify({
+            x: Math.round(rect.x + rect.width / 2),
+            y: Math.round(rect.y + rect.height / 2)
+          });
+        }`,
+      });
+
+      const text = this._extractTextFromResult(result);
+      if (text) {
+        let coords = JSON.parse(text);
+        if (typeof coords === 'string') {
+          coords = JSON.parse(coords);
+        }
+        return coords;
+      }
+    } catch {
+      // Silently ignore - element may not exist
+    }
+    return null;
+  }
+
+  /**
+   * Trigger visual feedback based on tool type and args
+   * @param {string} toolName - Name of the tool that was called
+   * @param {Object} args - Tool arguments
+   * @returns {Promise<void>}
+   */
+  async _triggerVisualFeedback(toolName, args) {
+    // Skip if visual feedback is disabled
+    if (process.env.JONS_MCP_SHOW_ACTIONS === 'off') {
+      return;
+    }
+
+    // Handle mouse click tools
+    if (MOUSE_CLICK_TOOLS.has(toolName)) {
+      let coords = null;
+
+      // For XY tools, coordinates are in args
+      if (toolName === 'browser_mouse_click_xy') {
+        coords = { x: args.x, y: args.y };
+      }
+      // For ref-based tools, get element center
+      else if (args.ref || args.element) {
+        coords = await this._getElementCenter(args.ref || args.element);
+      }
+
+      if (coords) {
+        await this._showVisualFeedback('showClick', coords);
+      }
+      return;
+    }
+
+    // Handle mouse move tools
+    if (MOUSE_MOVE_TOOLS.has(toolName)) {
+      let coords = null;
+
+      // For XY tools, use the destination coordinates
+      if (toolName === 'browser_mouse_move_xy') {
+        coords = { x: args.x, y: args.y };
+      } else if (toolName === 'browser_mouse_drag_xy') {
+        // For drag, show cursor at end position
+        coords = { x: args.endX, y: args.endY };
+      }
+      // For ref-based tools (browser_hover), get element center
+      else if (args.ref || args.element) {
+        coords = await this._getElementCenter(args.ref || args.element);
+      }
+
+      if (coords) {
+        await this._showVisualFeedback('moveCursor', coords);
+      }
+      return;
+    }
+
+    // Handle keyboard tools
+    if (KEYBOARD_TOOLS.has(toolName)) {
+      if (toolName === 'browser_press_key') {
+        const key = args.key || '';
+        await this._showVisualFeedback('showKey', { key });
+      } else if (toolName === 'browser_type') {
+        const text = args.text || '';
+        await this._showVisualFeedback('showText', { text });
+      }
+      return;
+    }
+  }
+
+  /**
+   * Handle browser_take_screenshot with overlay hide/show
+   * @param {Object} args - Tool arguments (may include showCursor)
+   * @param {Function} progress - Progress callback
+   * @returns {Promise<Object>} Screenshot result
+   */
+  async _handleScreenshot(args, progress) {
+    const { showCursor = false, ...screenshotArgs } = args;
+
+    // Only hide/show if visual feedback is enabled
+    const visualFeedbackEnabled = process.env.JONS_MCP_SHOW_ACTIONS !== 'off';
+
+    // Hide overlay before screenshot (unless showCursor is true)
+    if (visualFeedbackEnabled && !showCursor) {
+      try {
+        await this._inner.callTool('browser_evaluate', {
+          function: `() => { window.__mcpVisualFeedback?.hide() }`,
+        });
+      } catch {
+        // Silently ignore - overlay may not exist
+      }
+    }
+
+    // Take screenshot
+    let result;
+    try {
+      result = await this._inner.callTool('browser_take_screenshot', screenshotArgs, progress);
+    } finally {
+      // Always restore overlay after screenshot (unless showCursor is true)
+      if (visualFeedbackEnabled && !showCursor) {
+        try {
+          await this._inner.callTool('browser_evaluate', {
+            function: `() => { window.__mcpVisualFeedback?.show() }`,
+          });
+        } catch {
+          // Silently ignore - overlay may not exist
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Call a tool
    * Intercepts browser_snapshot for filtering, handles new tools
    * @param {string} name - Tool name
@@ -301,6 +518,10 @@ Original error: ${message}`,
       result = await this._handleRequestUpload(args);
       return this._postProcessResult(result);
     }
+    if (name === 'browser_take_screenshot') {
+      result = await this._handleScreenshot(args, progress);
+      return this._postProcessResult(result);
+    }
 
     // Auto-clear highlights before browser actions that indicate user is moving on
     if (HIGHLIGHT_CLEARING_ACTIONS.has(name) && this._activeHighlights.length > 0) {
@@ -322,6 +543,12 @@ Original error: ${message}`,
     // Pass through to inner backend with error enhancement
     try {
       result = await this._inner.callTool(name, args, progress);
+
+      // Trigger visual feedback for passthrough tools (non-blocking)
+      if (!result.isError) {
+        this._triggerVisualFeedback(name, args).catch(() => {});
+      }
+
       return this._postProcessResult(result);
     } catch (error) {
       return this._enhanceBrowserError(error);
@@ -490,6 +717,9 @@ Original error: ${message}`,
     if (result.isError || !result.content) {
       return result;
     }
+
+    // Trigger visual feedback for mouse and keyboard tools (non-blocking)
+    this._triggerVisualFeedback(name, toolArgs).catch(() => {});
 
     // Extract YAML snapshot from result
     const yamlSnapshot = this._extractYamlFromResult(result);

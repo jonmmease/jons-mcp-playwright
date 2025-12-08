@@ -48,6 +48,9 @@ for (const arg of args) {
     process.env.JONS_MCP_ADBLOCK_LISTS = lists;
   } else if (arg === '--ngrok') {
     config.ngrok = true;
+  } else if (arg === '--no-show-actions') {
+    // Disable visual feedback overlay (cursor, click ripples, keystroke HUD)
+    process.env.JONS_MCP_SHOW_ACTIONS = 'off';
   } else if (arg.startsWith('--playwright-')) {
     // Pass through to Playwright (convert kebab-case to camelCase)
     const playwrightArg = arg.replace('--playwright-', '');
@@ -71,11 +74,13 @@ Options:
   --playwright-*             Options passed through to Playwright MCP
                              Examples: --playwright-browser=firefox
                                        --playwright-headless
-  --ngrok                  Serve downloads via ngrok tunnel (requires NGROK_AUTHTOKEN)
+  --ngrok                    Serve downloads via ngrok tunnel (requires NGROK_AUTHTOKEN)
+  --no-show-actions          Disable visual feedback (cursor, click ripples, keystroke HUD)
 
 Environment Variables:
   PWMCP_DEBUG=1              Print debug output
   JONS_MCP_ADBLOCK=off       Disable ad blocking at runtime
+  JONS_MCP_SHOW_ACTIONS=off  Disable visual feedback at runtime
 `);
     process.exit(0);
   }
