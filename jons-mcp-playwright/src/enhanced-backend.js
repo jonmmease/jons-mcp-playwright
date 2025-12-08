@@ -12,6 +12,7 @@ import { schema as getImageSchema } from './tools/get-image.js';
 import { schema as getTextSchema } from './tools/get-text.js';
 import { schema as getTableSchema } from './tools/get-table.js';
 import { schema as getBoundsSchema } from './tools/get-bounds.js';
+import { highlightSchema, clearHighlightsSchema } from './tools/highlight.js';
 import { filterSnapshot, extractSubtree, estimateTokens, parseSnapshot, countElements } from './snapshot-filter.js';
 import { SnapshotCache } from './snapshot-cache.js';
 import { saveToFile } from './utils/file-output.js';
@@ -51,12 +52,37 @@ const SNAPSHOT_TOOLS = new Set([
   'browser_tabs',
 ]);
 
+// Actions that should auto-clear highlights before executing
+// These are user-facing actions that indicate the user is moving on
+const HIGHLIGHT_CLEARING_ACTIONS = new Set([
+  'browser_navigate',
+  'browser_navigate_back',
+  'browser_click',
+  'browser_type',
+  'browser_hover',
+  'browser_select_option',
+  'browser_drag',
+  'browser_press_key',
+  'browser_mouse_click_xy',
+  'browser_mouse_move_xy',
+  'browser_mouse_drag_xy',
+  'browser_file_upload',
+  'browser_handle_dialog',
+  'browser_scroll',
+  'browser_tab_new',
+  'browser_tab_close',
+  'browser_tab_select',
+  'browser_close',
+]);
+
 // Our new tool schemas
 const NEW_TOOLS = [
   getImageSchema,
   getTextSchema,
   getTableSchema,
   getBoundsSchema,
+  highlightSchema,
+  clearHighlightsSchema,
 ];
 
 /**
@@ -79,6 +105,8 @@ export class EnhancedBackend {
     this.config = config;
     this._inner = innerBackend;
     this._snapshotCache = new SnapshotCache(5000); // 5 second TTL
+    this._activeHighlights = []; // Track highlighted elements for cleanup
+    this._highlightStylesInjected = false; // Track if CSS has been injected
   }
 
   /**
@@ -230,6 +258,17 @@ Original error: ${message}`,
     }
     if (name === 'browser_get_bounds') {
       return this._handleGetBounds(args);
+    }
+    if (name === 'browser_highlight') {
+      return this._handleHighlight(args);
+    }
+    if (name === 'browser_clear_highlights') {
+      return this._handleClearHighlights();
+    }
+
+    // Auto-clear highlights before browser actions that indicate user is moving on
+    if (HIGHLIGHT_CLEARING_ACTIONS.has(name) && this._activeHighlights.length > 0) {
+      await this._clearHighlightsInternal();
     }
 
     // Intercept browser_snapshot for filtering
@@ -940,6 +979,281 @@ To download this image, use browser_navigate to go to the URL or use the URL in 
     }
 
     return null;
+  }
+
+  /**
+   * Inject highlight CSS styles into the page (once per page)
+   * @returns {Promise<void>}
+   */
+  async _injectHighlightStyles() {
+    if (this._highlightStylesInjected) {
+      return;
+    }
+
+    const css = `
+      .__mcp-highlight {
+        box-shadow: 0 0 0 4px var(--mcp-highlight-color, #ff0000) !important;
+        position: relative;
+      }
+
+      @keyframes __mcp-pulse {
+        0%, 100% { box-shadow: 0 0 0 4px var(--mcp-highlight-color, #ff0000); }
+        50% { box-shadow: 0 0 0 8px var(--mcp-highlight-color, #ff0000), 0 0 20px var(--mcp-highlight-color, #ff0000); }
+      }
+
+      .__mcp-highlight-pulse {
+        animation: __mcp-pulse 1.5s ease-in-out infinite;
+      }
+
+      .__mcp-highlight-label {
+        position: fixed;
+        background: var(--mcp-label-color, #ff0000);
+        color: white;
+        padding: 4px 12px;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: 500;
+        font-family: system-ui, -apple-system, sans-serif;
+        z-index: 10001;
+        pointer-events: none;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        white-space: nowrap;
+      }
+
+      .__mcp-highlight-label::before {
+        content: '';
+        position: absolute;
+        left: 50%;
+        bottom: -6px;
+        transform: translateX(-50%);
+        border-left: 6px solid transparent;
+        border-right: 6px solid transparent;
+        border-top: 6px solid var(--mcp-label-color, #ff0000);
+      }
+    `;
+
+    await this._inner.callTool('browser_evaluate', {
+      function: `() => {
+        if (!document.getElementById('__mcp-highlight-styles')) {
+          const style = document.createElement('style');
+          style.id = '__mcp-highlight-styles';
+          style.textContent = ${JSON.stringify(css)};
+          document.head.appendChild(style);
+        }
+      }`,
+    });
+
+    this._highlightStylesInjected = true;
+  }
+
+  /**
+   * Handle browser_highlight tool
+   * @param {Object} args - { refs: string[], color?: string, label?: string }
+   * @returns {Promise<Object>} Highlight result
+   */
+  async _handleHighlight(args) {
+    const { refs, color = 'red', label } = args;
+
+    if (!refs || !Array.isArray(refs) || refs.length === 0) {
+      return {
+        content: [{ type: 'text', text: 'browser_highlight requires a non-empty refs array' }],
+        isError: true,
+      };
+    }
+
+    // Inject styles if needed
+    await this._injectHighlightStyles();
+
+    // Clear any existing highlights first
+    await this._clearHighlightsInternal();
+
+    // Color mapping for convenience
+    const colorMap = {
+      red: '#ff0000',
+      blue: '#0066ff',
+      green: '#00aa00',
+      orange: '#ff8800',
+      purple: '#8800ff',
+    };
+
+    const cssColor = colorMap[color] || color;
+    const highlighted = [];
+    const failed = [];
+
+    // Highlight each element
+    for (const ref of refs) {
+      try {
+        await this._inner.callTool('browser_evaluate', {
+          ref,
+          element: 'element to highlight',
+          function: `(element) => {
+            element.classList.add('__mcp-highlight', '__mcp-highlight-pulse');
+            element.style.setProperty('--mcp-highlight-color', '${cssColor}');
+          }`,
+        });
+        highlighted.push(ref);
+        this._activeHighlights.push({ ref, type: 'element' });
+      } catch (error) {
+        failed.push({ ref, error: error.message || 'Unknown error' });
+      }
+    }
+
+    // Add label if specified (positioned near the first highlighted element)
+    if (label && highlighted.length > 0) {
+      try {
+        const firstRef = highlighted[0];
+        // Get bounding box of first element
+        const boundsResult = await this._inner.callTool('browser_evaluate', {
+          ref: firstRef,
+          element: 'element for label positioning',
+          function: `(element) => {
+            const rect = element.getBoundingClientRect();
+            return JSON.stringify({
+              x: rect.left + rect.width / 2,
+              y: rect.top,
+              width: rect.width,
+              height: rect.height
+            });
+          }`,
+        });
+
+        const boundsText = this._extractTextFromResult(boundsResult);
+        if (boundsText) {
+          // The result may have escaped quotes or be double-stringified
+          let bounds;
+          try {
+            // First try direct parse
+            bounds = JSON.parse(boundsText);
+            // If the result is still a string, parse again
+            if (typeof bounds === 'string') {
+              bounds = JSON.parse(bounds);
+            }
+          } catch (parseError) {
+            // Try unescaping backslash-escaped quotes first
+            try {
+              const unescaped = boundsText.replace(/\\"/g, '"');
+              bounds = JSON.parse(unescaped);
+            } catch (parseError2) {
+              throw new Error(`Failed to parse bounds: ${boundsText}`);
+            }
+          }
+          // Escape label text for embedding in JS string
+          const escapedLabel = label.replace(/'/g, "\\'").replace(/\n/g, '\\n');
+
+          // Create label element positioned above the element
+          const createLabelResult = await this._inner.callTool('browser_evaluate', {
+            function: `() => {
+              try {
+                const labelEl = document.createElement('div');
+                labelEl.className = '__mcp-highlight-label';
+                labelEl.id = '__mcp-highlight-label-' + Date.now();
+                labelEl.textContent = '${escapedLabel}';
+                labelEl.style.setProperty('--mcp-label-color', '${cssColor}');
+                labelEl.style.left = '${bounds.x}px';
+                labelEl.style.top = '${bounds.y - 40}px';
+                labelEl.style.transform = 'translateX(-50%)';
+                document.body.appendChild(labelEl);
+                return JSON.stringify({ success: true, id: labelEl.id });
+              } catch (e) {
+                return JSON.stringify({ success: false, error: e.message });
+              }
+            }`,
+          });
+          const labelResultText = this._extractTextFromResult(createLabelResult);
+          if (labelResultText) {
+            let labelResult;
+            try {
+              labelResult = JSON.parse(labelResultText);
+              if (typeof labelResult === 'string') {
+                labelResult = JSON.parse(labelResult);
+              }
+            } catch {
+              // Try unescaping backslash-escaped quotes
+              try {
+                const unescaped = labelResultText.replace(/\\"/g, '"');
+                labelResult = JSON.parse(unescaped);
+              } catch {
+                // Label was likely created, just can't parse the result
+                labelResult = { success: true };
+              }
+            }
+            if (!labelResult.success) {
+              throw new Error(`Label creation failed: ${labelResult.error}`);
+            }
+          }
+          this._activeHighlights.push({ type: 'label' });
+        }
+      } catch (error) {
+        // Label positioning failed, but highlights still worked
+        console.error('Failed to position label:', error.message);
+      }
+    }
+
+    // Build response
+    let resultText = `Highlighted ${highlighted.length}/${refs.length} element(s)`;
+    if (label) {
+      resultText += ` with label "${label}"`;
+    }
+    resultText += '.';
+
+    if (failed.length > 0) {
+      resultText += `\n\nFailed to highlight:\n${failed.map(f => `- ${f.ref}: ${f.error}`).join('\n')}`;
+    }
+
+    resultText += '\n\nHighlights will auto-clear on your next browser action.';
+
+    return {
+      content: [{ type: 'text', text: resultText }],
+      isError: failed.length > 0 && highlighted.length === 0,
+    };
+  }
+
+  /**
+   * Internal method to clear highlights (doesn't return MCP response)
+   * @returns {Promise<void>}
+   */
+  async _clearHighlightsInternal() {
+    if (this._activeHighlights.length === 0) {
+      return;
+    }
+
+    try {
+      await this._inner.callTool('browser_evaluate', {
+        function: `() => {
+          // Remove highlight classes from all elements
+          document.querySelectorAll('.__mcp-highlight').forEach(el => {
+            el.classList.remove('__mcp-highlight', '__mcp-highlight-pulse');
+            el.style.removeProperty('--mcp-highlight-color');
+          });
+          // Remove all label elements
+          document.querySelectorAll('.__mcp-highlight-label').forEach(el => {
+            el.remove();
+          });
+        }`,
+      });
+    } catch (error) {
+      // Silently ignore errors during cleanup (page may have navigated)
+    }
+
+    this._activeHighlights = [];
+  }
+
+  /**
+   * Handle browser_clear_highlights tool
+   * @returns {Promise<Object>} Clear result
+   */
+  async _handleClearHighlights() {
+    const hadHighlights = this._activeHighlights.length > 0;
+    await this._clearHighlightsInternal();
+
+    return {
+      content: [{
+        type: 'text',
+        text: hadHighlights
+          ? 'Cleared all highlights.'
+          : 'No highlights to clear.',
+      }],
+    };
   }
 
   /**
