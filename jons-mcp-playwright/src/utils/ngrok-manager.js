@@ -1,17 +1,20 @@
 /**
- * NgrokManager - Manages ngrok tunnel for serving downloaded files
+ * NgrokManager - Manages ngrok tunnel for serving downloaded files and accepting uploads
  *
  * Provides:
  * - HTTP server to serve downloaded files
+ * - HTTP server to accept file uploads from sandboxed environments
  * - ngrok tunnel for public URL access
- * - Security via session-scoped download whitelist
- * - Lazy initialization (only starts on first download)
+ * - Security via session-scoped token whitelists
+ * - Lazy initialization (only starts on first download/upload)
  */
 
 import http from 'http';
-import { createReadStream, existsSync, statSync } from 'fs';
+import { createReadStream, createWriteStream, existsSync, statSync, mkdirSync, unlinkSync } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { tmpdir } from 'os';
+import Busboy from 'busboy';
 
 // MIME types for common file extensions
 const MIME_TYPES = {
@@ -49,6 +52,8 @@ export class NgrokManager {
    * Create a new NgrokManager
    * @param {Object} config - Configuration options
    * @param {string} [config.tempDir] - Base temp directory for path validation
+   * @param {number} [config.maxUploadSize] - Maximum upload size in bytes (default 50MB)
+   * @param {number} [config.uploadTokenTTL] - Upload token TTL in ms (default 5 minutes)
    */
   constructor(config = {}) {
     this.config = config;
@@ -56,6 +61,10 @@ export class NgrokManager {
     this._listener = null;
     this._publicBaseUrl = null;
     this._downloads = new Map(); // token -> { localPath, filename }
+    this._uploadTokens = new Map(); // uploadToken -> { createdAt, filename, maxBytes }
+    this._uploadedFiles = new Map(); // fileToken -> { localPath, filename, uploadedAt }
+    this._maxUploadSize = config.maxUploadSize || 50 * 1024 * 1024; // 50MB default
+    this._uploadTokenTTL = config.uploadTokenTTL || 5 * 60 * 1000; // 5 minutes default
     this._isRunning = false;
   }
 
@@ -117,17 +126,44 @@ export class NgrokManager {
 
   /**
    * Handle incoming HTTP requests
+   * Routes to appropriate handler based on method and path
    * @param {http.IncomingMessage} req
    * @param {http.ServerResponse} res
    */
   _handleRequest(req, res) {
-    // Only allow GET requests
-    if (req.method !== 'GET') {
-      res.writeHead(405, { 'Allow': 'GET' });
-      res.end('Method Not Allowed');
+    const urlPath = req.url || '/';
+
+    // Add CORS headers for all responses
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Upload-Token');
+
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
       return;
     }
 
+    // Route based on method and path
+    if (req.method === 'GET' && urlPath.startsWith('/downloads/')) {
+      return this._handleDownload(req, res);
+    }
+
+    if (req.method === 'POST' && urlPath === '/uploads') {
+      return this._handleUpload(req, res);
+    }
+
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+
+  /**
+   * Handle download requests
+   * @param {http.IncomingMessage} req
+   * @param {http.ServerResponse} res
+   */
+  _handleDownload(req, res) {
     // Parse URL path: /downloads/{token}/{filename}
     const urlPath = req.url || '/';
     const match = urlPath.match(/^\/downloads\/([^/]+)\/(.+)$/);
@@ -194,6 +230,212 @@ export class NgrokManager {
   }
 
   /**
+   * Handle upload requests
+   * @param {http.IncomingMessage} req
+   * @param {http.ServerResponse} res
+   */
+  _handleUpload(req, res) {
+    // Validate upload token from header
+    const uploadToken = req.headers['x-upload-token'];
+    if (!uploadToken) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Missing X-Upload-Token header' }));
+      return;
+    }
+
+    // Check if token exists and is valid
+    const tokenData = this._uploadTokens.get(uploadToken);
+    if (!tokenData) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Invalid upload token' }));
+      return;
+    }
+
+    // Check if token has expired
+    if (Date.now() - tokenData.createdAt > this._uploadTokenTTL) {
+      this._uploadTokens.delete(uploadToken);
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Upload token expired' }));
+      return;
+    }
+
+    // Check Content-Length header for size limit
+    const contentLength = parseInt(req.headers['content-length'] || '0', 10);
+    const maxSize = tokenData.maxBytes || this._maxUploadSize;
+    if (contentLength > maxSize) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: `File too large. Maximum size: ${maxSize} bytes` }));
+      return;
+    }
+
+    // Ensure uploads directory exists
+    const uploadsDir = this._getUploadsDir();
+    mkdirSync(uploadsDir, { recursive: true });
+
+    // Parse multipart form data
+    let busboy;
+    try {
+      busboy = Busboy({ headers: req.headers, limits: { fileSize: maxSize } });
+    } catch (error) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Invalid request format. Expected multipart/form-data' }));
+      return;
+    }
+
+    let fileReceived = false;
+    let uploadedFilePath = null;
+    let uploadedFilename = null;
+    let uploadedBytes = 0;
+    let fileTooLarge = false;
+    let writeStreamFinished = false;
+    let busboyFinished = false;
+    let responseHandled = false;
+
+    const sendResponse = () => {
+      // Wait for both busboy and write stream to finish
+      if (!busboyFinished || !writeStreamFinished || responseHandled) {
+        return;
+      }
+      responseHandled = true;
+
+      // Invalidate the upload token (single use)
+      this._uploadTokens.delete(uploadToken);
+
+      if (fileTooLarge) {
+        // Clean up partial file
+        try {
+          if (uploadedFilePath && existsSync(uploadedFilePath)) {
+            unlinkSync(uploadedFilePath);
+          }
+        } catch (e) { /* ignore cleanup errors */ }
+
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: `File too large. Maximum size: ${maxSize} bytes` }));
+        return;
+      }
+
+      if (!fileReceived || !uploadedFilePath) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'No file received' }));
+        return;
+      }
+
+      // Generate file token for later use with browser_file_upload
+      const fileToken = randomUUID();
+      this._uploadedFiles.set(fileToken, {
+        localPath: uploadedFilePath,
+        filename: uploadedFilename,
+        uploadedAt: Date.now(),
+      });
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        fileToken,
+        filename: uploadedFilename,
+        bytes: uploadedBytes,
+      }));
+    };
+
+    busboy.on('file', (fieldname, fileStream, info) => {
+      if (fileReceived) {
+        // Only accept one file per upload
+        fileStream.resume();
+        return;
+      }
+      fileReceived = true;
+
+      const { filename } = info;
+      uploadedFilename = filename || tokenData.filename || 'uploaded-file';
+
+      // Generate unique filename to avoid collisions
+      const fileTokenForPath = randomUUID();
+      const safeFilename = uploadedFilename.replace(/[^a-zA-Z0-9._-]/g, '_');
+      uploadedFilePath = path.join(uploadsDir, `${fileTokenForPath}-${safeFilename}`);
+
+      const writeStream = createWriteStream(uploadedFilePath);
+
+      fileStream.on('data', (data) => {
+        uploadedBytes += data.length;
+        if (uploadedBytes > maxSize) {
+          fileTooLarge = true;
+          fileStream.destroy();
+          writeStream.destroy();
+        }
+      });
+
+      writeStream.on('finish', () => {
+        writeStreamFinished = true;
+        sendResponse();
+      });
+
+      writeStream.on('error', () => {
+        writeStreamFinished = true;
+        sendResponse();
+      });
+
+      fileStream.pipe(writeStream);
+
+      fileStream.on('limit', () => {
+        fileTooLarge = true;
+      });
+    });
+
+    busboy.on('finish', () => {
+      busboyFinished = true;
+      // If no file was received, we can respond immediately
+      if (!fileReceived) {
+        writeStreamFinished = true;
+      }
+      sendResponse();
+    });
+
+    busboy.on('error', (error) => {
+      if (!responseHandled) {
+        responseHandled = true;
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: `Upload error: ${error.message}` }));
+      }
+    });
+
+    // Handle request errors
+    req.on('error', (error) => {
+      if (!responseHandled) {
+        responseHandled = true;
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: `Request error: ${error.message}` }));
+      }
+    });
+
+    // Handle aborted requests
+    req.on('aborted', () => {
+      if (!responseHandled) {
+        responseHandled = true;
+        // Don't send response on aborted request
+      }
+    });
+
+    try {
+      req.pipe(busboy);
+    } catch (error) {
+      if (!responseHandled) {
+        responseHandled = true;
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: `Pipe error: ${error.message}` }));
+      }
+    }
+  }
+
+  /**
+   * Get the uploads directory path
+   * @returns {string}
+   */
+  _getUploadsDir() {
+    const tempDir = this.config.tempDir || tmpdir();
+    return path.join(tempDir, 'playwright-mcp', 'uploads');
+  }
+
+  /**
    * Register a downloaded file for serving
    * @param {string} localPath - Absolute path to the downloaded file
    * @param {string} filename - Original filename for download
@@ -228,6 +470,62 @@ export class NgrokManager {
   }
 
   /**
+   * Register a new upload token
+   * @param {Object} options - Options for the upload
+   * @param {string} [options.filename] - Expected filename (optional)
+   * @param {number} [options.maxBytes] - Max file size for this upload (optional, uses default if not specified)
+   * @returns {{ uploadToken: string, uploadUrl: string, expiresIn: number }}
+   */
+  registerUploadToken(options = {}) {
+    const uploadToken = randomUUID();
+    const expiresIn = Math.floor(this._uploadTokenTTL / 1000); // Convert to seconds
+
+    this._uploadTokens.set(uploadToken, {
+      createdAt: Date.now(),
+      filename: options.filename || null,
+      maxBytes: options.maxBytes || null,
+    });
+
+    const uploadUrl = `${this._publicBaseUrl}/uploads`;
+
+    return {
+      uploadToken,
+      uploadUrl,
+      expiresIn,
+    };
+  }
+
+  /**
+   * Get the local file path for an uploaded file token
+   * @param {string} fileToken - Token from a completed upload
+   * @returns {string|null} Local file path, or null if token is invalid/expired
+   */
+  getUploadedFilePath(fileToken) {
+    const uploadData = this._uploadedFiles.get(fileToken);
+    if (!uploadData) {
+      return null;
+    }
+
+    // Check if file still exists
+    if (!existsSync(uploadData.localPath)) {
+      this._uploadedFiles.delete(fileToken);
+      return null;
+    }
+
+    return uploadData.localPath;
+  }
+
+  /**
+   * Get the filename for an uploaded file token
+   * @param {string} fileToken - Token from a completed upload
+   * @returns {string|null} Original filename, or null if token is invalid
+   */
+  getUploadedFilename(fileToken) {
+    const uploadData = this._uploadedFiles.get(fileToken);
+    return uploadData ? uploadData.filename : null;
+  }
+
+  /**
    * Stop the manager and clean up resources
    */
   async stop() {
@@ -253,8 +551,10 @@ export class NgrokManager {
       this._server = null;
     }
 
-    // Clear downloads
+    // Clear all maps
     this._downloads.clear();
+    this._uploadTokens.clear();
+    this._uploadedFiles.clear();
     this._publicBaseUrl = null;
     this._isRunning = false;
   }
