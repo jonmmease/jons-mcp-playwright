@@ -72,6 +72,17 @@ export async function createConnection(config = {}, contextGetter) {
       : [initPagePath, existingInitPages];
   }
 
+  // Add Chrome flags to suppress "Restore pages?" dialog after crash/unclean shutdown
+  // This prevents the crash recovery bubble from appearing when the browser process
+  // was killed without graceful shutdown (e.g., from lock clearing or Ctrl+C)
+  playwrightConfig.browser = playwrightConfig.browser || {};
+  playwrightConfig.browser.launchOptions = playwrightConfig.browser.launchOptions || {};
+  playwrightConfig.browser.launchOptions.args = [
+    ...(playwrightConfig.browser.launchOptions.args || []),
+    '--disable-session-crashed-bubble',
+    '--hide-crash-restore-bubble',
+  ];
+
   // Enable all capabilities by default (vision for coordinate tools, pdf for PDF handling)
   // This exposes browser_mouse_click_xy, browser_mouse_move_xy, browser_mouse_drag_xy
   if (!playwrightConfig.capabilities) {
