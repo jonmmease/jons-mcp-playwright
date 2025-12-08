@@ -170,6 +170,57 @@ test.describe('download path detection patterns', () => {
   });
 });
 
+// Tests for upload functionality without ngrok
+test.describe('upload tools (ngrok disabled)', () => {
+  test('browser_request_upload returns error when ngrok disabled', async ({ client }) => {
+    const response = await client.callTool({
+      name: 'browser_request_upload',
+      arguments: {},
+    });
+
+    expect(response.isError).toBe(true);
+    const text = response.content[0].text;
+    expect(text).toContain('--ngrok flag');
+    expect(text).toContain('NGROK_AUTHTOKEN');
+  });
+
+  test('browser_request_upload tool is available', async ({ client }) => {
+    const tools = await client.listTools();
+    const toolNames = tools.tools.map((t: any) => t.name);
+    expect(toolNames).toContain('browser_request_upload');
+  });
+
+  test('browser_file_upload schema includes fileTokens parameter', async ({ client }) => {
+    const tools = await client.listTools();
+    const fileUploadTool = tools.tools.find((t: any) => t.name === 'browser_file_upload');
+    expect(fileUploadTool).toBeTruthy();
+    expect(fileUploadTool.inputSchema.properties.fileTokens).toBeTruthy();
+    expect(fileUploadTool.inputSchema.properties.fileTokens.type).toBe('array');
+  });
+
+  test('browser_file_upload with invalid fileToken returns error', async ({ client, server }) => {
+    server.setRoute('/upload-form', (req, res) => {
+      res.end(`
+        <html><body>
+          <input type="file" id="fileInput">
+        </body></html>
+      `);
+    });
+
+    await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/upload-form' } });
+
+    // Try to use fileTokens without ngrok enabled
+    const response = await client.callTool({
+      name: 'browser_file_upload',
+      arguments: { fileTokens: ['invalid-token-123'] },
+    });
+
+    expect(response.isError).toBe(true);
+    const text = response.content[0].text;
+    expect(text).toContain('--ngrok flag');
+  });
+});
+
 // Tests that require real ngrok - skip by default
 test.describe('ngrok enabled (requires NGROK_AUTHTOKEN)', () => {
   // Skip these tests unless NGROK_AUTHTOKEN is set
@@ -196,5 +247,73 @@ test.describe('ngrok enabled (requires NGROK_AUTHTOKEN)', () => {
     // Should show ngrok URL instead of local path
     expect(text).toContain('https://');
     expect(text).toMatch(/\.ngrok.*\.io|ngrok-free\.(app|dev)/);
+  });
+
+  test('browser_request_upload returns upload URL when ngrok enabled', async ({ startClient }) => {
+    const { client } = await startClient({
+      args: ['--ngrok'],
+    });
+
+    const response = await client.callTool({
+      name: 'browser_request_upload',
+      arguments: { filename: 'test.pdf' },
+    });
+
+    expect(response.isError).toBeFalsy();
+    const text = response.content[0].text;
+    expect(text).toContain('Upload URL');
+    expect(text).toContain('Upload Token');
+    expect(text).toContain('https://');
+    expect(text).toContain('X-Upload-Token');
+  });
+
+  test('full upload flow: request_upload -> POST -> file available', async ({ startClient }) => {
+    const { client } = await startClient({
+      args: ['--ngrok'],
+    });
+
+    // Step 1: Get upload URL
+    const uploadResponse = await client.callTool({
+      name: 'browser_request_upload',
+      arguments: { filename: 'test.txt' },
+    });
+
+    expect(uploadResponse.isError).toBeFalsy();
+    const text = uploadResponse.content[0].text;
+
+    // Extract upload URL and token from response
+    const urlMatch = text.match(/\*\*Upload URL:\*\* (https:\/\/[^\s]+)/);
+    const tokenMatch = text.match(/\*\*Upload Token:\*\* ([a-f0-9-]+)/);
+    expect(urlMatch).toBeTruthy();
+    expect(tokenMatch).toBeTruthy();
+
+    const uploadUrl = urlMatch![1];
+    const uploadToken = tokenMatch![1];
+
+    // Step 2: POST a file to the upload URL using native fetch with FormData
+    const formData = new globalThis.FormData();
+    const blob = new Blob(['Hello from test!'], { type: 'text/plain' });
+    formData.append('file', blob, 'test.txt');
+
+    const fetchResponse = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'X-Upload-Token': uploadToken,
+      },
+      body: formData,
+    });
+
+    const responseBody = await fetchResponse.text();
+
+    if (fetchResponse.status !== 200) {
+      console.log('Upload failed. Status:', fetchResponse.status);
+      console.log('Response body:', responseBody);
+    }
+    expect(fetchResponse.status).toBe(200);
+    const jsonResponse = JSON.parse(responseBody);
+    expect(jsonResponse.success).toBe(true);
+    expect(jsonResponse.fileToken).toBeTruthy();
+    expect(jsonResponse.filename).toBe('test.txt');
+    expect(jsonResponse.bytes).toBe(16); // "Hello from test!".length
   });
 });
