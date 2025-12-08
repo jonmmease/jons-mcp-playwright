@@ -185,6 +185,25 @@ export class EnhancedBackend {
       }
     }
 
+    // Extend browser_file_upload with fileTokens parameter
+    const fileUploadTool = tools.find(t => t.name === 'browser_file_upload');
+    if (fileUploadTool && fileUploadTool.inputSchema) {
+      fileUploadTool.inputSchema = {
+        ...fileUploadTool.inputSchema,
+        properties: {
+          ...fileUploadTool.inputSchema.properties,
+          fileTokens: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'File tokens from browser_request_upload. Use this when uploading files from a sandboxed environment. Get tokens by calling browser_request_upload first, POSTing your file, then using the returned fileToken here.',
+          },
+        },
+      };
+      // Update description to mention fileTokens
+      fileUploadTool.description = (fileUploadTool.description || '') +
+        ' For sandboxed environments, use fileTokens parameter with tokens from browser_request_upload.';
+    }
+
     // Add our new tools
     for (const schema of NEW_TOOLS) {
       tools.push({
@@ -449,7 +468,20 @@ Original error: ${message}`,
    * @returns {Promise<Object>} Filtered result
    */
   async _handleSnapshotTool(name, args, progress) {
-    const { maxDepth, listLimit, ...toolArgs } = args;
+    const { maxDepth, listLimit, fileTokens, ...toolArgs } = args;
+
+    // For browser_file_upload, resolve fileTokens to local paths
+    if (name === 'browser_file_upload' && fileTokens && fileTokens.length > 0) {
+      const resolveResult = await this._resolveFileTokens(fileTokens);
+      if (resolveResult.error) {
+        return {
+          content: [{ type: 'text', text: resolveResult.error }],
+          isError: true,
+        };
+      }
+      // Merge resolved paths with any existing paths
+      toolArgs.paths = [...(toolArgs.paths || []), ...resolveResult.paths];
+    }
 
     // Call inner backend with original args (minus our filter params)
     const result = await this._inner.callTool(name, toolArgs, progress);
@@ -1274,6 +1306,111 @@ To download this image, use browser_navigate to go to the URL or use the URL in 
           : 'No highlights to clear.',
       }],
     };
+  }
+
+  /**
+   * Handle browser_request_upload tool
+   * @param {Object} args - { filename?: string, maxBytes?: number }
+   * @returns {Promise<Object>} Upload URL and token
+   */
+  async _handleRequestUpload(args) {
+    // Check if ngrok is enabled
+    if (!this.config.ngrok) {
+      return {
+        content: [{
+          type: 'text',
+          text: `browser_request_upload requires the --ngrok flag to be enabled.
+
+To enable ngrok:
+1. Set the NGROK_AUTHTOKEN environment variable
+2. Start the server with the --ngrok flag
+
+This feature allows sandboxed environments to upload files for use with browser_file_upload.`,
+        }],
+        isError: true,
+      };
+    }
+
+    try {
+      // Ensure ngrok manager is running
+      const ngrok = await this._ensureNgrokManager();
+
+      // Register upload token
+      const { uploadToken, uploadUrl, expiresIn } = ngrok.registerUploadToken({
+        filename: args.filename,
+        maxBytes: args.maxBytes,
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Upload URL ready.
+
+**Upload URL:** ${uploadUrl}
+**Upload Token:** ${uploadToken}
+**Expires in:** ${expiresIn} seconds
+
+**Instructions:**
+1. POST your file to the upload URL as multipart/form-data
+2. Include header: \`X-Upload-Token: ${uploadToken}\`
+3. The response will contain a \`fileToken\`
+4. Use that fileToken with browser_file_upload(fileTokens: [<fileToken>])
+
+**Example curl command:**
+\`\`\`bash
+curl -X POST "${uploadUrl}" \\
+  -H "X-Upload-Token: ${uploadToken}" \\
+  -F "file=@/path/to/your/file.pdf"
+\`\`\`
+
+The response will be JSON: \`{"success": true, "fileToken": "...", "filename": "...", "bytes": ...}\``,
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: `Failed to create upload URL: ${error.message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * Resolve file tokens to local file paths
+   * @param {string[]} fileTokens - Array of file tokens from uploads
+   * @returns {Promise<{ paths?: string[], error?: string }>}
+   */
+  async _resolveFileTokens(fileTokens) {
+    // Check if ngrok is enabled
+    if (!this.config.ngrok || !this._ngrokManager) {
+      return {
+        error: 'File tokens require --ngrok flag to be enabled. Use local file paths instead, or enable ngrok.',
+      };
+    }
+
+    const resolvedPaths = [];
+    const errors = [];
+
+    for (const token of fileTokens) {
+      const localPath = this._ngrokManager.getUploadedFilePath(token);
+      if (localPath) {
+        resolvedPaths.push(localPath);
+      } else {
+        const filename = this._ngrokManager.getUploadedFilename(token);
+        if (filename) {
+          errors.push(`File token "${token}" (${filename}) - file no longer exists`);
+        } else {
+          errors.push(`Invalid or expired file token: "${token}"`);
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      return {
+        error: `Failed to resolve file tokens:\n${errors.join('\n')}\n\nTo upload files:\n1. Call browser_request_upload to get an upload URL\n2. POST your file to that URL\n3. Use the returned fileToken with browser_file_upload`,
+      };
+    }
+
+    return { paths: resolvedPaths };
   }
 
   /**
