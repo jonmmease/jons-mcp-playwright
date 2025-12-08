@@ -14,6 +14,7 @@ import { schema as getTextSchema } from './tools/get-text.js';
 import { schema as getTableSchema } from './tools/get-table.js';
 import { schema as getBoundsSchema } from './tools/get-bounds.js';
 import { highlightSchema, clearHighlightsSchema } from './tools/highlight.js';
+import { schema as requestUploadSchema } from './tools/request-upload.js';
 import { filterSnapshot, extractSubtree, estimateTokens, parseSnapshot, countElements } from './snapshot-filter.js';
 import { SnapshotCache } from './snapshot-cache.js';
 import { saveToFile } from './utils/file-output.js';
@@ -85,6 +86,7 @@ const NEW_TOOLS = [
   getBoundsSchema,
   highlightSchema,
   clearHighlightsSchema,
+  requestUploadSchema,
 ];
 
 /**
@@ -274,6 +276,10 @@ Original error: ${message}`,
     }
     if (name === 'browser_clear_highlights') {
       result = await this._handleClearHighlights();
+      return this._postProcessResult(result);
+    }
+    if (name === 'browser_request_upload') {
+      result = await this._handleRequestUpload(args);
       return this._postProcessResult(result);
     }
 
