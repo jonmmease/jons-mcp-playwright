@@ -1722,13 +1722,25 @@ The response will be JSON: \`{"success": true, "fileToken": "...", "filename": "
       const { publicUrl } = ngrok.registerDownload(localPath, filename);
 
       if (type === 'download') {
-        // Replace "- Downloaded file X to /local/path" with just the ngrok URL
-        const newText = `- Downloaded file ${filename}\n  Download URL: ${publicUrl}`;
+        // Replace "- Downloaded file X to /local/path" with ngrok URL and download instructions
+        const newText = `- Downloaded file ${filename}
+  Download URL: ${publicUrl}
+
+  To download with curl or wget, include the ngrok-skip-browser-warning header:
+  \`\`\`bash
+  curl -L -H "ngrok-skip-browser-warning: true" -o "${filename}" "${publicUrl}"
+  \`\`\``;
         text = text.replace(fullMatch, newText);
         modified = true;
       } else if (type === 'savefile') {
-        // Replace local path with ngrok URL
-        text = text.replace(fullMatch, fullMatch.replace(localPath, publicUrl));
+        // Replace local path with ngrok URL and add download instructions
+        const newText = `${fullMatch.replace(localPath, publicUrl)}
+
+  To download with curl or wget, include the ngrok-skip-browser-warning header:
+  \`\`\`bash
+  curl -L -H "ngrok-skip-browser-warning: true" -o "${filename}" "${publicUrl}"
+  \`\`\``;
+        text = text.replace(fullMatch, newText);
         modified = true;
       }
     }
