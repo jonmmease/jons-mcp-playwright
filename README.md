@@ -113,6 +113,91 @@ Edit your Claude Code MCP settings file directly:
 
 </details>
 
+### Using with Claude Desktop
+
+Edit your Claude Desktop config file:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+<details>
+<summary><b>From GitHub (recommended)</b></summary>
+
+```json
+{
+  "mcpServers": {
+    "jons-playwright": {
+      "command": "npx",
+      "args": [
+        "--yes",
+        "github:jonmmease/jons-mcp-playwright/jons-mcp-playwright"
+      ]
+    }
+  }
+}
+```
+
+With ad blocking:
+
+```json
+{
+  "mcpServers": {
+    "jons-playwright": {
+      "command": "npx",
+      "args": [
+        "--yes",
+        "github:jonmmease/jons-mcp-playwright/jons-mcp-playwright",
+        "--adblock"
+      ]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>From local directory</b></summary>
+
+First install dependencies:
+
+```bash
+cd /path/to/jons-mcp-playwright/jons-mcp-playwright
+npm install
+```
+
+Then add to your config:
+
+```json
+{
+  "mcpServers": {
+    "jons-playwright": {
+      "command": "node",
+      "args": [
+        "/path/to/jons-mcp-playwright/jons-mcp-playwright/cli.js"
+      ]
+    }
+  }
+}
+```
+
+With ad blocking:
+
+```json
+{
+  "mcpServers": {
+    "jons-playwright": {
+      "command": "node",
+      "args": [
+        "/path/to/jons-mcp-playwright/jons-mcp-playwright/cli.js",
+        "--adblock"
+      ]
+    }
+  }
+}
+```
+
+</details>
+
 ---
 
 ## Upstream Playwright MCP
