@@ -337,40 +337,7 @@ Original error: ${message}`,
   }
 
   /**
-   * Get element coordinates for visual feedback
-   * @param {string} ref - Element reference
-   * @returns {Promise<{x: number, y: number}|null>}
-   */
-  async _getElementCenter(ref) {
-    try {
-      const result = await this._inner.callTool('browser_evaluate', {
-        ref,
-        element: 'target element',
-        function: `(element) => {
-          const rect = element.getBoundingClientRect();
-          return JSON.stringify({
-            x: Math.round(rect.x + rect.width / 2),
-            y: Math.round(rect.y + rect.height / 2)
-          });
-        }`,
-      });
-
-      const text = this._extractTextFromResult(result);
-      if (text) {
-        let coords = JSON.parse(text);
-        if (typeof coords === 'string') {
-          coords = JSON.parse(coords);
-        }
-        return coords;
-      }
-    } catch {
-      // Silently ignore - element may not exist
-    }
-    return null;
-  }
-
-  /**
-   * Trigger visual feedback based on tool type and args
+   * Trigger visual feedback for keyboard and XY-based mouse tools
    * @param {string} toolName - Name of the tool that was called
    * @param {Object} args - Tool arguments
    * @returns {Promise<void>}
@@ -381,39 +348,14 @@ Original error: ${message}`,
       return;
     }
 
-    // Handle mouse click tools
-    if (MOUSE_CLICK_TOOLS.has(toolName)) {
-      let coords = null;
-
-      // For XY tools, coordinates are in args
-      if (toolName === 'browser_mouse_click_xy') {
-        coords = { x: args.x, y: args.y };
-      }
-      // For ref-based tools, get element center
-      else if (args.ref || args.element) {
-        coords = await this._getElementCenter(args.ref || args.element);
-      }
-
-      if (coords) {
-        await this._showVisualFeedback('showClick', coords);
-      }
-      return;
-    }
-
-    // Handle mouse move tools
+    // Handle mouse move tools (XY-based only, ref-based hover doesn't work reliably)
     if (MOUSE_MOVE_TOOLS.has(toolName)) {
       let coords = null;
 
-      // For XY tools, use the destination coordinates
       if (toolName === 'browser_mouse_move_xy') {
         coords = { x: args.x, y: args.y };
       } else if (toolName === 'browser_mouse_drag_xy') {
-        // For drag, show cursor at end position
         coords = { x: args.endX, y: args.endY };
-      }
-      // For ref-based tools (browser_hover), get element center
-      else if (args.ref || args.element) {
-        coords = await this._getElementCenter(args.ref || args.element);
       }
 
       if (coords) {
@@ -534,6 +476,55 @@ Original error: ${message}`,
       return this._postProcessResult(result);
     }
 
+    // Intercept browser_click to show visual feedback before the click
+    // Must be before SNAPSHOT_TOOLS check since browser_click is in that set
+    if (name === 'browser_click' && args.ref && process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+      result = await this._handleClickWithFeedback(args, progress);
+      return this._postProcessResult(result);
+    }
+
+    // Intercept browser_hover to show visual feedback (scroll + cursor)
+    // Must be before SNAPSHOT_TOOLS check since browser_hover is in that set
+    if (name === 'browser_hover' && args.ref && process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+      result = await this._handleHoverWithFeedback(args, progress);
+      return this._postProcessResult(result);
+    }
+
+    // Intercept browser_mouse_click_xy to show cursor + ripple before click
+    // Must be before SNAPSHOT_TOOLS check since it's in that set
+    if (name === 'browser_mouse_click_xy' && process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+      const coords = { x: args.x, y: args.y };
+      // Show cursor first, pause so user sees where click will happen
+      await this._showVisualFeedback('moveCursor', coords);
+      await new Promise(r => setTimeout(r, 300));
+      // Fire-and-forget ripple, then click
+      this._showVisualFeedback('showClick', coords).catch(() => {});
+      result = await this._handleSnapshotTool(name, args, progress);
+      return this._postProcessResult(result);
+    }
+
+    // Intercept browser_mouse_drag_xy to show cursor animation from start to end
+    // Must be before SNAPSHOT_TOOLS check since it's in that set
+    if (name === 'browser_mouse_drag_xy' && process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+      // Show cursor at start position (must await so it actually appears)
+      await this._showVisualFeedback('moveCursor', { x: args.startX, y: args.startY });
+      // Wait so user sees the start position
+      await new Promise(r => setTimeout(r, 500));
+      // Fire-and-forget cursor move to end position
+      this._showVisualFeedback('moveCursor', { x: args.endX, y: args.endY }).catch(() => {});
+      // Small delay for animation (CSS transition is 50ms)
+      await new Promise(r => setTimeout(r, 100));
+      result = await this._handleSnapshotTool(name, args, progress);
+      return this._postProcessResult(result);
+    }
+
+    // Intercept browser_drag to show cursor animation from source to target element
+    // Must be before SNAPSHOT_TOOLS check since it's in that set
+    if (name === 'browser_drag' && args.startRef && args.endRef && process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+      result = await this._handleDragWithFeedback(args, progress);
+      return this._postProcessResult(result);
+    }
+
     // Intercept all snapshot-returning tools for filtering
     if (SNAPSHOT_TOOLS.has(name)) {
       result = await this._handleSnapshotTool(name, args, progress);
@@ -542,14 +533,230 @@ Original error: ${message}`,
 
     // Pass through to inner backend with error enhancement
     try {
+      // Trigger visual feedback BEFORE action for browser_mouse_move_xy
+      if (name === 'browser_mouse_move_xy' && process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+        // Fire-and-forget cursor move
+        this._showVisualFeedback('moveCursor', { x: args.x, y: args.y }).catch(() => {});
+      }
+
       result = await this._inner.callTool(name, args, progress);
 
-      // Trigger visual feedback for passthrough tools (non-blocking)
-      if (!result.isError) {
+      // Trigger visual feedback AFTER action for keyboard tools
+      if (!result.isError && KEYBOARD_TOOLS.has(name)) {
         this._triggerVisualFeedback(name, args).catch(() => {});
       }
 
       return this._postProcessResult(result);
+    } catch (error) {
+      return this._enhanceBrowserError(error);
+    }
+  }
+
+  /**
+   * Handle browser_click with visual feedback
+   * Takes a snapshot first to establish ref context, gets element bounds, shows animation, then clicks
+   * @param {Object} args - Tool arguments
+   * @param {Function} progress - Progress callback
+   * @returns {Promise<Object>} Click result
+   */
+  async _handleClickWithFeedback(args, progress) {
+    try {
+      // Step 1: Take a snapshot to establish ref context (using inner to avoid filtering overhead)
+      await this._inner.callTool('browser_snapshot', {});
+
+      // Step 2: Get element center coordinates
+      const boundsResult = await this._inner.callTool('browser_evaluate', {
+        ref: args.ref,
+        element: args.element || 'target element',
+        function: `(element) => {
+          const rect = element.getBoundingClientRect();
+          return JSON.stringify({
+            x: Math.round(rect.x + rect.width / 2),
+            y: Math.round(rect.y + rect.height / 2)
+          });
+        }`,
+      });
+
+      // Extract coordinates from result - the result is in markdown format like:
+      // ### Result\n"{\"x\":508,\"y\":33}"\n\n### Ran Playwright code...
+      const resultText = boundsResult?.content?.[0]?.text || '';
+
+      // Step 3: Scroll element into view so user can see the click
+      await this._inner.callTool('browser_evaluate', {
+        ref: args.ref,
+        element: args.element || 'target element',
+        function: `(element) => {
+          element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+        }`,
+      });
+
+      // Step 4: Get coordinates AFTER scrolling (they may have changed)
+      const boundsAfterScroll = await this._inner.callTool('browser_evaluate', {
+        ref: args.ref,
+        element: args.element || 'target element',
+        function: `(element) => {
+          const rect = element.getBoundingClientRect();
+          return JSON.stringify({
+            x: Math.round(rect.x + rect.width / 2),
+            y: Math.round(rect.y + rect.height / 2)
+          });
+        }`,
+      });
+
+      const scrolledResultText = boundsAfterScroll?.content?.[0]?.text || '';
+      const resultMatch = scrolledResultText.match(/### Result\n"(.+?)"\n/s);
+      if (resultMatch && !boundsAfterScroll.isError) {
+        try {
+          const jsonStr = resultMatch[1].replace(/\\"/g, '"');
+          const clickCoords = JSON.parse(jsonStr);
+
+          // Step 5: Show cursor at click location
+          await this._showVisualFeedback('moveCursor', clickCoords);
+
+          // Step 6: Wait so user can see where the click will happen
+          await new Promise(r => setTimeout(r, 300));
+
+          // Step 7: Show click ripple (fire and forget - don't wait for browser_evaluate round trip)
+          this._showVisualFeedback('showClick', clickCoords).catch(() => {});
+        } catch (e) {
+          // Failed to parse bounds, continue without animation
+        }
+      }
+
+      // Step 8: Perform the actual click
+      return await this._inner.callTool('browser_click', args, progress);
+    } catch (error) {
+      return this._enhanceBrowserError(error);
+    }
+  }
+
+  /**
+   * Handle browser_hover with visual feedback
+   * Takes a snapshot first to establish ref context, scrolls element into view, shows cursor, then hovers
+   * @param {Object} args - Tool arguments
+   * @param {Function} progress - Progress callback
+   * @returns {Promise<Object>} Hover result
+   */
+  async _handleHoverWithFeedback(args, progress) {
+    try {
+      // Step 1: Take a snapshot to establish ref context
+      await this._inner.callTool('browser_snapshot', {});
+
+      // Step 2: Scroll element into view and get its coordinates
+      const scrollAndBoundsResult = await this._inner.callTool('browser_evaluate', {
+        ref: args.ref,
+        element: args.element || 'target element',
+        function: `(element) => {
+          element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+          const rect = element.getBoundingClientRect();
+          return JSON.stringify({
+            x: Math.round(rect.x + rect.width / 2),
+            y: Math.round(rect.y + rect.height / 2)
+          });
+        }`,
+      });
+
+      // Step 3: Parse coordinates and show cursor
+      const resultText = scrollAndBoundsResult?.content?.[0]?.text || '';
+      const resultMatch = resultText.match(/### Result\n"(.+?)"\n/s);
+
+      if (resultMatch && !scrollAndBoundsResult.isError) {
+        try {
+          const jsonStr = resultMatch[1].replace(/\\"/g, '"');
+          const coords = JSON.parse(jsonStr);
+
+          // Show cursor at hover location (fire and forget - don't wait for browser_evaluate round trip)
+          this._showVisualFeedback('moveCursor', coords).catch(() => {});
+        } catch (e) {
+          // Failed to parse bounds, continue without animation
+        }
+      }
+
+      // Step 4: Perform the actual hover
+      return await this._inner.callTool('browser_hover', args, progress);
+    } catch (error) {
+      return this._enhanceBrowserError(error);
+    }
+  }
+
+  /**
+   * Handle browser_drag with visual feedback
+   * Takes a snapshot first, scrolls source into view, shows cursor at source,
+   * animates to target, then performs the drag
+   * @param {Object} args - Tool arguments (startRef, endRef, startElement, endElement)
+   * @param {Function} progress - Progress callback
+   * @returns {Promise<Object>} Drag result
+   */
+  async _handleDragWithFeedback(args, progress) {
+    try {
+      // Step 1: Take a snapshot to establish ref context
+      await this._inner.callTool('browser_snapshot', {});
+
+      // Step 2: Scroll source element into view and get its center coordinates
+      const startBoundsResult = await this._inner.callTool('browser_evaluate', {
+        ref: args.startRef,
+        element: args.startElement || 'source element',
+        function: `(element) => {
+          element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+          const rect = element.getBoundingClientRect();
+          return JSON.stringify({
+            x: Math.round(rect.x + rect.width / 2),
+            y: Math.round(rect.y + rect.height / 2)
+          });
+        }`,
+      });
+
+      // Step 3: Parse start coordinates and show cursor
+      const startResultText = startBoundsResult?.content?.[0]?.text || '';
+      const startResultMatch = startResultText.match(/### Result\n"(.+?)"\n/s);
+      let startCoords = null;
+
+      if (startResultMatch && !startBoundsResult.isError) {
+        try {
+          const jsonStr = startResultMatch[1].replace(/\\"/g, '"');
+          startCoords = JSON.parse(jsonStr);
+          // Show cursor at source location
+          await this._showVisualFeedback('moveCursor', startCoords);
+          // Wait so user sees where drag starts
+          await new Promise(r => setTimeout(r, 500));
+        } catch (e) {
+          // Failed to parse bounds, continue without animation
+        }
+      }
+
+      // Step 4: Get target element coordinates (may need to scroll)
+      const endBoundsResult = await this._inner.callTool('browser_evaluate', {
+        ref: args.endRef,
+        element: args.endElement || 'target element',
+        function: `(element) => {
+          element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+          const rect = element.getBoundingClientRect();
+          return JSON.stringify({
+            x: Math.round(rect.x + rect.width / 2),
+            y: Math.round(rect.y + rect.height / 2)
+          });
+        }`,
+      });
+
+      // Step 5: Parse end coordinates and animate cursor
+      const endResultText = endBoundsResult?.content?.[0]?.text || '';
+      const endResultMatch = endResultText.match(/### Result\n"(.+?)"\n/s);
+
+      if (endResultMatch && !endBoundsResult.isError) {
+        try {
+          const jsonStr = endResultMatch[1].replace(/\\"/g, '"');
+          const endCoords = JSON.parse(jsonStr);
+          // Animate cursor to target (fire-and-forget)
+          this._showVisualFeedback('moveCursor', endCoords).catch(() => {});
+          // Small delay for animation
+          await new Promise(r => setTimeout(r, 100));
+        } catch (e) {
+          // Failed to parse bounds, continue without animation
+        }
+      }
+
+      // Step 6: Perform the actual drag
+      return await this._inner.callTool('browser_drag', args, progress);
     } catch (error) {
       return this._enhanceBrowserError(error);
     }

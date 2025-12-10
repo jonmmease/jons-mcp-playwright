@@ -29,6 +29,9 @@ export default async function initPage({ page }) {
       // Inline the overlay code to run in browser context
       // This creates the same functionality as overlay.js but in the page
 
+      // Configurable cursor color (purple by default)
+      const CURSOR_COLOR = '#C72BE8';
+
       const STYLES = `
         /* Overlay container */
         #__mcp-overlay-container {
@@ -41,32 +44,20 @@ export default async function initPage({ page }) {
           z-index: 999999;
         }
 
-        /* Custom cursor */
+        /* Custom cursor - SVG arrow pointer */
         #__mcp-cursor {
           position: fixed;
-          width: 16px;
-          height: 16px;
-          border-radius: 50%;
-          background: rgba(255, 59, 48, 0.7);
-          border: 2px solid rgba(255, 255, 255, 0.9);
-          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+          width: 30px;
+          height: 30px;
           pointer-events: none;
           z-index: 999999;
-          transform: translate(-50%, -50%);
-          transition: left 0.05s ease-out, top 0.05s ease-out;
+          transition: left 0.05s ease-out, top 0.05s ease-out, opacity 0.3s ease-out;
           display: none;
+          opacity: 1;
         }
 
-        #__mcp-cursor::after {
-          content: '';
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          width: 4px;
-          height: 4px;
-          background: white;
-          border-radius: 50%;
-          transform: translate(-50%, -50%);
+        #__mcp-cursor.fading {
+          opacity: 0;
         }
 
         /* Click ripple animation */
@@ -86,10 +77,10 @@ export default async function initPage({ page }) {
           width: 40px;
           height: 40px;
           border-radius: 50%;
-          border: 3px solid rgba(255, 59, 48, 0.8);
+          border: 3px solid ${CURSOR_COLOR};
           pointer-events: none;
           z-index: 999998;
-          animation: __mcp-ripple 0.5s ease-out forwards;
+          animation: __mcp-ripple 0.1s ease-out forwards;
         }
 
         /* Keystroke HUD */
@@ -131,7 +122,7 @@ export default async function initPage({ page }) {
         }
 
         .__mcp-key-special {
-          color: #ffd60a;
+          color: ${CURSOR_COLOR};
         }
 
         .__mcp-text {
@@ -180,6 +171,7 @@ export default async function initPage({ page }) {
       let cursorElement = null;
       let keystrokeHud = null;
       let hideTimeout = null;
+      let cursorFadeTimeout = null;
       let isHidden = false;
 
       function createOverlay() {
@@ -196,9 +188,13 @@ export default async function initPage({ page }) {
         overlayContainer.id = '__mcp-overlay-container';
         document.body.appendChild(overlayContainer);
 
-        // Create cursor
-        cursorElement = document.createElement('div');
+        // Create cursor as SVG arrow pointer
+        cursorElement = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         cursorElement.id = '__mcp-cursor';
+        cursorElement.setAttribute('width', '30');
+        cursorElement.setAttribute('height', '30');
+        cursorElement.setAttribute('viewBox', '0 0 24 24');
+        cursorElement.innerHTML = `<path fill="${CURSOR_COLOR}" stroke="#000000" stroke-width="1.25" d="M5.5 3.21V20.8c0 .45.54.67.85.35l4.86-4.86a.5.5 0 0 1 .35-.15h6.87a.5.5 0 0 0 .35-.85L6.35 2.85a.5.5 0 0 0-.85.35Z"></path>`;
         overlayContainer.appendChild(cursorElement);
 
         // Create keystroke HUD
@@ -209,9 +205,25 @@ export default async function initPage({ page }) {
 
       function moveCursor(x, y) {
         if (!cursorElement || isHidden) return;
+
+        // Clear any pending fade timeout
+        if (cursorFadeTimeout) {
+          clearTimeout(cursorFadeTimeout);
+          cursorFadeTimeout = null;
+        }
+
+        // Show cursor and remove fading class
+        cursorElement.classList.remove('fading');
         cursorElement.style.left = `${x}px`;
         cursorElement.style.top = `${y}px`;
         cursorElement.style.display = 'block';
+
+        // Set timeout to fade out after 1 second of inactivity
+        cursorFadeTimeout = setTimeout(() => {
+          if (cursorElement) {
+            cursorElement.classList.add('fading');
+          }
+        }, 5000);
       }
 
       function showClick(x, y) {
