@@ -1,16 +1,16 @@
 /**
- * NgrokManager - Manages ngrok tunnel for serving downloaded files and accepting uploads
+ * LocalhostServer - Manages local HTTP server for serving downloaded files and accepting uploads
  *
  * Provides:
  * - HTTP server to serve downloaded files
  * - HTTP server to accept file uploads from sandboxed environments
- * - ngrok tunnel for public URL access
- * - Security via session-scoped token whitelists
+ * - Security via session-scoped token whitelists with TTL
  * - Lazy initialization (only starts on first download/upload)
+ * - Automatic cleanup of expired downloads and uploads
  */
 
 import http from 'http';
-import { createReadStream, createWriteStream, existsSync, statSync, mkdirSync, unlinkSync } from 'fs';
+import { createReadStream, createWriteStream, existsSync, statSync, mkdirSync, unlinkSync, readdirSync, rmSync } from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { tmpdir } from 'os';
@@ -37,6 +37,12 @@ const MIME_TYPES = {
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 };
 
+// Default TTL for download tokens (1 hour)
+const DEFAULT_DOWNLOAD_TOKEN_TTL = 60 * 60 * 1000;
+
+// Cleanup interval for expired downloads (10 minutes)
+const CLEANUP_INTERVAL = 10 * 60 * 1000;
+
 /**
  * Get MIME type for a file based on extension
  * @param {string} filePath - Path to file
@@ -47,25 +53,27 @@ function getMimeType(filePath) {
   return MIME_TYPES[ext] || 'application/octet-stream';
 }
 
-export class NgrokManager {
+export class LocalhostServer {
   /**
-   * Create a new NgrokManager
+   * Create a new LocalhostServer
    * @param {Object} config - Configuration options
    * @param {string} [config.tempDir] - Base temp directory for path validation
    * @param {number} [config.maxUploadSize] - Maximum upload size in bytes (default 50MB)
    * @param {number} [config.uploadTokenTTL] - Upload token TTL in ms (default 5 minutes)
+   * @param {number} [config.downloadTokenTTL] - Download token TTL in ms (default 1 hour)
    */
   constructor(config = {}) {
     this.config = config;
     this._server = null;
-    this._listener = null;
     this._publicBaseUrl = null;
-    this._downloads = new Map(); // token -> { localPath, filename }
+    this._downloads = new Map(); // token -> { localPath, filename, registeredAt }
     this._uploadTokens = new Map(); // uploadToken -> { createdAt, filename, maxBytes }
     this._uploadedFiles = new Map(); // fileToken -> { localPath, filename, uploadedAt }
     this._maxUploadSize = config.maxUploadSize || 50 * 1024 * 1024; // 50MB default
     this._uploadTokenTTL = config.uploadTokenTTL || 5 * 60 * 1000; // 5 minutes default
+    this._downloadTokenTTL = config.downloadTokenTTL || DEFAULT_DOWNLOAD_TOKEN_TTL; // 1 hour default
     this._isRunning = false;
+    this._cleanupTimer = null;
   }
 
   /**
@@ -86,42 +94,37 @@ export class NgrokManager {
 
   /**
    * Ensure the manager is running (lazy initialization)
-   * Creates HTTP server and starts ngrok tunnel on first call
+   * Creates HTTP server on first call
    */
   async ensureRunning() {
     if (this._isRunning) {
       return;
     }
 
+    // Clean up orphaned uploads from previous sessions
+    this._cleanupOrphanedUploads();
+
     // Create HTTP server
     this._server = http.createServer(this._handleRequest.bind(this));
 
-    // Listen on random available port
+    // Determine port: use MCP_FILE_SERVER_PORT env var if set, otherwise random
+    const envPort = process.env.MCP_FILE_SERVER_PORT;
+    const port = envPort ? parseInt(envPort, 10) : 0;
+
+    // Listen on 0.0.0.0 for Docker compatibility
     await new Promise((resolve, reject) => {
-      this._server.listen(0, '127.0.0.1', () => resolve());
+      this._server.listen(port, '0.0.0.0', () => resolve());
       this._server.on('error', reject);
     });
 
-    const port = this._server.address().port;
+    const actualPort = this._server.address().port;
+    this._publicBaseUrl = `http://localhost:${actualPort}`;
+    this._isRunning = true;
 
-    // Start ngrok tunnel
-    // Dynamic import to avoid loading ngrok if not needed
-    const ngrok = await import('@ngrok/ngrok');
-
-    try {
-      this._listener = await ngrok.forward({
-        addr: port,
-        authtoken_from_env: true,
-      });
-
-      this._publicBaseUrl = this._listener.url();
-      this._isRunning = true;
-    } catch (error) {
-      // Clean up server if ngrok fails
-      this._server.close();
-      this._server = null;
-      throw new Error(`Failed to start ngrok tunnel: ${error.message}`);
-    }
+    // Start periodic cleanup timer
+    this._cleanupTimer = setInterval(() => {
+      this._cleanupExpiredDownloads();
+    }, CLEANUP_INTERVAL);
   }
 
   /**
@@ -182,6 +185,14 @@ export class NgrokManager {
     if (!download) {
       res.writeHead(404);
       res.end('Not Found');
+      return;
+    }
+
+    // Check if download token has expired
+    if (Date.now() - download.registeredAt > this._downloadTokenTTL) {
+      this._downloads.delete(token);
+      res.writeHead(404);
+      res.end('Download link expired');
       return;
     }
 
@@ -436,12 +447,59 @@ export class NgrokManager {
   }
 
   /**
+   * Clean up orphaned upload files from previous sessions
+   * Called on startup to clear any leftover files in the uploads directory
+   */
+  _cleanupOrphanedUploads() {
+    const uploadsDir = this._getUploadsDir();
+    if (!existsSync(uploadsDir)) {
+      return;
+    }
+
+    try {
+      const files = readdirSync(uploadsDir);
+      for (const file of files) {
+        try {
+          const filePath = path.join(uploadsDir, file);
+          rmSync(filePath, { force: true });
+        } catch (e) {
+          // Ignore individual file cleanup errors
+        }
+      }
+    } catch (e) {
+      // Ignore directory read errors
+    }
+  }
+
+  /**
+   * Clean up expired download tokens
+   * Removes download registrations that have exceeded their TTL
+   */
+  _cleanupExpiredDownloads() {
+    const now = Date.now();
+    const expiredTokens = [];
+
+    for (const [token, download] of this._downloads.entries()) {
+      if (now - download.registeredAt > this._downloadTokenTTL) {
+        expiredTokens.push(token);
+      }
+    }
+
+    for (const token of expiredTokens) {
+      this._downloads.delete(token);
+    }
+  }
+
+  /**
    * Register a downloaded file for serving
    * @param {string} localPath - Absolute path to the downloaded file
    * @param {string} filename - Original filename for download
    * @returns {{ token: string, publicUrl: string }}
    */
   registerDownload(localPath, filename) {
+    // Clean up expired downloads before registering new one
+    this._cleanupExpiredDownloads();
+
     const token = randomUUID();
 
     this._downloads.set(token, {
@@ -526,21 +584,42 @@ export class NgrokManager {
   }
 
   /**
-   * Stop the manager and clean up resources
+   * Delete all files in the uploads directory
+   * Called during stop() to clean up uploaded files
+   */
+  _cleanupUploadFiles() {
+    const uploadsDir = this._getUploadsDir();
+    if (!existsSync(uploadsDir)) {
+      return;
+    }
+
+    try {
+      const files = readdirSync(uploadsDir);
+      for (const file of files) {
+        try {
+          const filePath = path.join(uploadsDir, file);
+          rmSync(filePath, { force: true });
+        } catch (e) {
+          // Ignore individual file cleanup errors
+        }
+      }
+    } catch (e) {
+      // Ignore directory read errors
+    }
+  }
+
+  /**
+   * Stop the server and clean up resources
    */
   async stop() {
     if (!this._isRunning) {
       return;
     }
 
-    // Close ngrok listener
-    if (this._listener) {
-      try {
-        await this._listener.close();
-      } catch (error) {
-        // Ignore close errors
-      }
-      this._listener = null;
+    // Stop cleanup timer
+    if (this._cleanupTimer) {
+      clearInterval(this._cleanupTimer);
+      this._cleanupTimer = null;
     }
 
     // Close HTTP server
@@ -551,6 +630,9 @@ export class NgrokManager {
       this._server = null;
     }
 
+    // Clean up uploaded files from disk
+    this._cleanupUploadFiles();
+
     // Clear all maps
     this._downloads.clear();
     this._uploadTokens.clear();
@@ -560,4 +642,4 @@ export class NgrokManager {
   }
 }
 
-export default NgrokManager;
+export default LocalhostServer;

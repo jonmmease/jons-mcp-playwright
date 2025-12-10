@@ -30,7 +30,6 @@ const DEFAULT_CONFIG = {
   maxTextLength: 100,
   includeDeveloperTools: false,
   tempDir: null, // Will use OS temp dir
-  ngrok: false, // Serve downloads via ngrok tunnel
 };
 
 /**

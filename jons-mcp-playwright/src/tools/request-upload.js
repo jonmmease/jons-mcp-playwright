@@ -16,7 +16,7 @@ WORKFLOW for uploading files to a webpage:
 4. Click the upload button on the webpage (triggers file chooser)
 5. Call browser_file_upload with fileTokens: [<fileToken>]
 
-This tool requires the --ngrok flag to be enabled.`,
+Use this for sandboxed environments that cannot access local file paths directly.`,
   inputSchema: {
     type: 'object',
     properties: {

@@ -18,7 +18,7 @@ import { schema as requestUploadSchema } from './tools/request-upload.js';
 import { filterSnapshot, extractSubtree, estimateTokens, parseSnapshot, countElements } from './snapshot-filter.js';
 import { SnapshotCache } from './snapshot-cache.js';
 import { saveToFile } from './utils/file-output.js';
-import { NgrokManager } from './utils/ngrok-manager.js';
+import { LocalhostServer } from './utils/localhost-server.js';
 
 // Mouse tools that should trigger visual feedback
 const MOUSE_CLICK_TOOLS = new Set([
@@ -129,7 +129,7 @@ export class EnhancedBackend {
     this._snapshotCache = new SnapshotCache(5000); // 5 second TTL
     this._activeHighlights = []; // Track highlighted elements for cleanup
     this._highlightStylesInjected = false; // Track if CSS has been injected
-    this._ngrokManager = null; // Lazy-initialized ngrok manager for serving downloads
+    this._localhostServer = null; // Lazy-initialized localhost server for serving downloads
   }
 
   /**
@@ -1544,29 +1544,12 @@ To download this image, use browser_navigate to go to the URL or use the URL in 
    * @returns {Promise<Object>} Upload URL and token
    */
   async _handleRequestUpload(args) {
-    // Check if ngrok is enabled
-    if (!this.config.ngrok) {
-      return {
-        content: [{
-          type: 'text',
-          text: `browser_request_upload requires the --ngrok flag to be enabled.
-
-To enable ngrok:
-1. Set the NGROK_AUTHTOKEN environment variable
-2. Start the server with the --ngrok flag
-
-This feature allows sandboxed environments to upload files for use with browser_file_upload.`,
-        }],
-        isError: true,
-      };
-    }
-
     try {
-      // Ensure ngrok manager is running
-      const ngrok = await this._ensureNgrokManager();
+      // Ensure localhost server is running
+      const server = await this._ensureLocalhostServer();
 
       // Register upload token
-      const { uploadToken, uploadUrl, expiresIn } = ngrok.registerUploadToken({
+      const { uploadToken, uploadUrl, expiresIn } = server.registerUploadToken({
         filename: args.filename,
         maxBytes: args.maxBytes,
       });
@@ -1610,22 +1593,20 @@ The response will be JSON: \`{"success": true, "fileToken": "...", "filename": "
    * @returns {Promise<{ paths?: string[], error?: string }>}
    */
   async _resolveFileTokens(fileTokens) {
-    // Check if ngrok is enabled
-    if (!this.config.ngrok || !this._ngrokManager) {
-      return {
-        error: 'File tokens require --ngrok flag to be enabled. Use local file paths instead, or enable ngrok.',
-      };
+    // Ensure localhost server is running to resolve tokens
+    if (!this._localhostServer) {
+      await this._ensureLocalhostServer();
     }
 
     const resolvedPaths = [];
     const errors = [];
 
     for (const token of fileTokens) {
-      const localPath = this._ngrokManager.getUploadedFilePath(token);
+      const localPath = this._localhostServer.getUploadedFilePath(token);
       if (localPath) {
         resolvedPaths.push(localPath);
       } else {
-        const filename = this._ngrokManager.getUploadedFilename(token);
+        const filename = this._localhostServer.getUploadedFilename(token);
         if (filename) {
           errors.push(`File token "${token}" (${filename}) - file no longer exists`);
         } else {
@@ -1644,32 +1625,27 @@ The response will be JSON: \`{"success": true, "fileToken": "...", "filename": "
   }
 
   /**
-   * Ensure NgrokManager is initialized (lazy)
-   * @returns {Promise<NgrokManager>}
+   * Ensure LocalhostServer is initialized (lazy)
+   * @returns {Promise<LocalhostServer>}
    */
-  async _ensureNgrokManager() {
-    if (!this._ngrokManager) {
-      this._ngrokManager = new NgrokManager({
+  async _ensureLocalhostServer() {
+    if (!this._localhostServer) {
+      this._localhostServer = new LocalhostServer({
         tempDir: this.config.tempDir,
       });
     }
-    if (!this._ngrokManager.isRunning) {
-      await this._ngrokManager.ensureRunning();
+    if (!this._localhostServer.isRunning) {
+      await this._localhostServer.ensureRunning();
     }
-    return this._ngrokManager;
+    return this._localhostServer;
   }
 
   /**
-   * Post-process tool results to replace local file paths with ngrok URLs
+   * Post-process tool results to replace local file paths with localhost URLs
    * @param {Object} result - Tool result from callTool
-   * @returns {Promise<Object>} Modified result with ngrok URLs
+   * @returns {Promise<Object>} Modified result with localhost URLs
    */
   async _postProcessResult(result) {
-    // Skip if ngrok is not enabled
-    if (!this.config.ngrok) {
-      return result;
-    }
-
     // Skip if result is empty or an error
     if (!result || !result.content || result.isError) {
       return result;
@@ -1714,31 +1690,31 @@ The response will be JSON: \`{"success": true, "fileToken": "...", "filename": "
       return result;
     }
 
-    // Initialize ngrok manager (lazy)
-    const ngrok = await this._ensureNgrokManager();
+    // Initialize localhost server (lazy)
+    const server = await this._ensureLocalhostServer();
 
     // Process each path and replace in text
     for (const { localPath, filename, fullMatch, type } of pathsToProcess) {
-      const { publicUrl } = ngrok.registerDownload(localPath, filename);
+      const { publicUrl } = server.registerDownload(localPath, filename);
 
       if (type === 'download') {
-        // Replace "- Downloaded file X to /local/path" with ngrok URL and download instructions
+        // Replace "- Downloaded file X to /local/path" with localhost URL and download instructions
         const newText = `- Downloaded file ${filename}
   Download URL: ${publicUrl}
 
-  To download with curl or wget, include the ngrok-skip-browser-warning header:
+  To download with curl or wget:
   \`\`\`bash
-  curl -L -H "ngrok-skip-browser-warning: true" -o "${filename}" "${publicUrl}"
+  curl -L -o "${filename}" "${publicUrl}"
   \`\`\``;
         text = text.replace(fullMatch, newText);
         modified = true;
       } else if (type === 'savefile') {
-        // Replace local path with ngrok URL and add download instructions
+        // Replace local path with localhost URL and add download instructions
         const newText = `${fullMatch.replace(localPath, publicUrl)}
 
-  To download with curl or wget, include the ngrok-skip-browser-warning header:
+  To download with curl or wget:
   \`\`\`bash
-  curl -L -H "ngrok-skip-browser-warning: true" -o "${filename}" "${publicUrl}"
+  curl -L -o "${filename}" "${publicUrl}"
   \`\`\``;
         text = text.replace(fullMatch, newText);
         modified = true;
@@ -1765,10 +1741,10 @@ The response will be JSON: \`{"success": true, "fileToken": "...", "filename": "
    * Called when the server is closed
    */
   async serverClosed() {
-    // Clean up ngrok manager
-    if (this._ngrokManager) {
-      await this._ngrokManager.stop();
-      this._ngrokManager = null;
+    // Clean up localhost server
+    if (this._localhostServer) {
+      await this._localhostServer.stop();
+      this._localhostServer = null;
     }
 
     if (this._inner.serverClosed) {

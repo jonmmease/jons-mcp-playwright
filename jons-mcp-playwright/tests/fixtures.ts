@@ -62,6 +62,7 @@ class SimpleTestServer {
 export type StartClient = (options?: {
   args?: string[];
   config?: Config;
+  env?: Record<string, string>;
 }) => Promise<{ client: Client; stderr: () => string }>;
 
 type TestFixtures = {
@@ -121,6 +122,7 @@ export const test = baseTest.extend<TestFixtures, WorkerFixtures>({
           DEBUG: 'pw:mcp:test',
           DEBUG_COLORS: '0',
           DEBUG_HIDE_DATE: '1',
+          ...options?.env,
         },
       });
 

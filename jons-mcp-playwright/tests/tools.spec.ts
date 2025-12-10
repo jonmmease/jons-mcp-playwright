@@ -3,9 +3,6 @@
  */
 
 import { test, expect } from './fixtures';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 
 test.describe('browser_get_text', () => {
   test('extracts text from element', async ({ client, server }) => {
@@ -288,7 +285,7 @@ test.describe('Developer Tools Filtering', () => {
 });
 
 test.describe('saveToFile', () => {
-  test('saves snapshot to file', async ({ client, server }) => {
+  test('saves snapshot to file and returns localhost URL', async ({ client, server }) => {
     server.setRoute('/save', (req, res) => {
       res.end('<html><body><p>Hello World</p></body></html>');
     });
@@ -303,21 +300,20 @@ test.describe('saveToFile', () => {
     const text = response.content[0].text;
     expect(text).toContain('Snapshot saved');
     expect(text).toContain('Path:');
-    expect(text).toContain(path.join(os.tmpdir(), 'playwright-mcp'));
+    expect(text).toContain('http://localhost:');
+    expect(text).toContain('/downloads/');
     expect(text).toContain('Tokens');
     expect(text).toContain('Elements');
 
-    // Extract path and verify file exists
-    const pathMatch = text.match(/Path: ([^\n]+)/);
-    expect(pathMatch).toBeTruthy();
-    const filePath = pathMatch![1].trim();
-    expect(fs.existsSync(filePath)).toBe(true);
-
-    // Clean up
-    fs.unlinkSync(filePath);
+    // Extract URL and verify file can be fetched
+    const urlMatch = text.match(/http:\/\/localhost:\d+\/downloads\/[a-f0-9-]+\/[^\s]+/);
+    expect(urlMatch).toBeTruthy();
+    const downloadUrl = urlMatch![0];
+    const fetchResponse = await fetch(downloadUrl);
+    expect(fetchResponse.status).toBe(200);
   });
 
-  test('saves text to file', async ({ client, server }) => {
+  test('saves text to file and returns localhost URL', async ({ client, server }) => {
     server.setRoute('/save-text', (req, res) => {
       res.end('<html><body><button id="content">Some text content to save</button></body></html>');
     });
@@ -339,16 +335,16 @@ test.describe('saveToFile', () => {
     expect(response.isError).toBeFalsy();
     const text = response.content[0].text;
     expect(text).toContain('saved to:');
+    expect(text).toContain('http://localhost:');
+    expect(text).toContain('/downloads/');
     expect(text).toContain('Words:');
     expect(text).toContain('Characters:');
 
-    // Extract path and verify file exists
-    const pathMatch = text.match(/saved to: ([^\n]+)/);
-    expect(pathMatch).toBeTruthy();
-    const filePath = pathMatch![1].trim();
-    expect(fs.existsSync(filePath)).toBe(true);
-
-    // Clean up
-    fs.unlinkSync(filePath);
+    // Extract URL and verify file can be fetched
+    const urlMatch = text.match(/http:\/\/localhost:\d+\/downloads\/[a-f0-9-]+\/[^\s]+/);
+    expect(urlMatch).toBeTruthy();
+    const downloadUrl = urlMatch![0];
+    const fetchResponse = await fetch(downloadUrl);
+    expect(fetchResponse.status).toBe(200);
   });
 });

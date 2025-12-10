@@ -1,72 +1,14 @@
 /**
- * Tests for ngrok download URL functionality
+ * Tests for localhost server file serving and upload functionality
  *
- * Note: Most tests run without real ngrok to avoid network dependencies.
- * Tests that require real ngrok are marked with .skip and can be run manually
- * with NGROK_AUTHTOKEN set.
+ * The localhost server provides URL-based access to files for sandboxed environments.
+ * It runs automatically (no flags needed) and binds to 0.0.0.0 for Docker compatibility.
  */
 
 import { test, expect } from './fixtures';
-import { spawn } from 'child_process';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-test.describe('ngrok CLI flag', () => {
-  test('--ngrok flag requires NGROK_AUTHTOKEN', async () => {
-    // Spawn CLI with --ngrok but without NGROK_AUTHTOKEN
-    const cliPath = path.join(__dirname, '../cli.js');
-
-    const result = await new Promise<{ code: number; stderr: string }>((resolve) => {
-      const proc = spawn('node', [cliPath, '--ngrok'], {
-        env: { ...process.env, NGROK_AUTHTOKEN: '' },
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stderr = '';
-      proc.stderr?.on('data', (data) => {
-        stderr += data.toString();
-      });
-
-      proc.on('close', (code) => {
-        resolve({ code: code ?? 1, stderr });
-      });
-
-      // Kill after a short timeout in case it doesn't exit
-      setTimeout(() => proc.kill(), 3000);
-    });
-
-    expect(result.code).toBe(1);
-    expect(result.stderr).toContain('--ngrok requires NGROK_AUTHTOKEN');
-  });
-
-  test('--ngrok appears in help text', async () => {
-    const cliPath = path.join(__dirname, '../cli.js');
-
-    const result = await new Promise<{ stdout: string }>((resolve) => {
-      const proc = spawn('node', [cliPath, '--help'], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      proc.stdout?.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      proc.on('close', () => {
-        resolve({ stdout });
-      });
-    });
-
-    expect(result.stdout).toContain('--ngrok');
-    expect(result.stdout).toContain('ngrok tunnel');
-  });
-});
-
-test.describe('ngrok disabled (default)', () => {
-  test('saveToFile shows local path when ngrok disabled', async ({ client, server }) => {
+test.describe('localhost server download URLs', () => {
+  test('saveToFile shows localhost URL', async ({ client, server }) => {
     server.setRoute('/save', (req, res) => {
       res.end('<html><body><p>Hello World</p></body></html>');
     });
@@ -80,13 +22,12 @@ test.describe('ngrok disabled (default)', () => {
     expect(response.isError).toBeFalsy();
     const text = response.content[0].text;
 
-    // Should show local path, not ngrok URL
-    expect(text).toContain('Path:');
-    expect(text).not.toContain('ngrok');
-    expect(text).not.toContain('https://');
+    // Should show localhost URL with /downloads/ path
+    expect(text).toContain('http://localhost:');
+    expect(text).toContain('/downloads/');
   });
 
-  test('browser_get_text saveToFile shows local path when ngrok disabled', async ({ client, server }) => {
+  test('browser_get_text saveToFile shows localhost URL', async ({ client, server }) => {
     server.setRoute('/text', (req, res) => {
       res.end('<html><body><button>Some text</button></body></html>');
     });
@@ -108,9 +49,35 @@ test.describe('ngrok disabled (default)', () => {
     expect(response.isError).toBeFalsy();
     const text = response.content[0].text;
 
-    // Should show local path, not ngrok URL
-    expect(text).toContain('saved to:');
-    expect(text).not.toContain('ngrok');
+    // Should show localhost URL with /downloads/ path
+    expect(text).toContain('http://localhost:');
+    expect(text).toContain('/downloads/');
+  });
+
+  test('download URL returns file content with curl', async ({ client, server }) => {
+    server.setRoute('/download-test', (req, res) => {
+      res.end('<html><body><p>Download test content</p></body></html>');
+    });
+
+    await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/download-test' } });
+    const response = await client.callTool({
+      name: 'browser_snapshot',
+      arguments: { saveToFile: true },
+    });
+
+    expect(response.isError).toBeFalsy();
+    const text = response.content[0].text;
+
+    // Extract the download URL (format: /downloads/{token}/{filename})
+    const urlMatch = text.match(/http:\/\/localhost:\d+\/downloads\/[a-f0-9-]+\/[^\s]+/);
+    expect(urlMatch).toBeTruthy();
+    const downloadUrl = urlMatch![0];
+
+    // Fetch the file
+    const fetchResponse = await fetch(downloadUrl);
+    expect(fetchResponse.status).toBe(200);
+    const content = await fetchResponse.text();
+    expect(content).toContain('Download test content');
   });
 });
 
@@ -170,18 +137,20 @@ test.describe('download path detection patterns', () => {
   });
 });
 
-// Tests for upload functionality without ngrok
-test.describe('upload tools (ngrok disabled)', () => {
-  test('browser_request_upload returns error when ngrok disabled', async ({ client }) => {
+test.describe('upload tools', () => {
+  test('browser_request_upload returns upload URL and token', async ({ client }) => {
     const response = await client.callTool({
       name: 'browser_request_upload',
-      arguments: {},
+      arguments: { filename: 'test.pdf' },
     });
 
-    expect(response.isError).toBe(true);
+    expect(response.isError).toBeFalsy();
     const text = response.content[0].text;
-    expect(text).toContain('--ngrok flag');
-    expect(text).toContain('NGROK_AUTHTOKEN');
+    expect(text).toContain('Upload URL');
+    expect(text).toContain('Upload Token');
+    expect(text).toContain('http://localhost:');
+    expect(text).toContain('/upload');
+    expect(text).toContain('X-Upload-Token');
   });
 
   test('browser_request_upload tool is available', async ({ client }) => {
@@ -209,7 +178,7 @@ test.describe('upload tools (ngrok disabled)', () => {
 
     await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/upload-form' } });
 
-    // Try to use fileTokens without ngrok enabled
+    // Try to use fileTokens with invalid token
     const response = await client.callTool({
       name: 'browser_file_upload',
       arguments: { fileTokens: ['invalid-token-123'] },
@@ -217,61 +186,10 @@ test.describe('upload tools (ngrok disabled)', () => {
 
     expect(response.isError).toBe(true);
     const text = response.content[0].text;
-    expect(text).toContain('--ngrok flag');
-  });
-});
-
-// Tests that require real ngrok - skip by default
-test.describe('ngrok enabled (requires NGROK_AUTHTOKEN)', () => {
-  // Skip these tests unless NGROK_AUTHTOKEN is set
-  test.skip(!process.env.NGROK_AUTHTOKEN, 'Requires NGROK_AUTHTOKEN environment variable');
-
-  test('saveToFile shows ngrok URL when enabled', async ({ startClient, server }) => {
-    const { client } = await startClient({
-      args: ['--ngrok'],
-    });
-
-    server.setRoute('/ngrok-test', (req, res) => {
-      res.end('<html><body><p>Test content</p></body></html>');
-    });
-
-    await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/ngrok-test' } });
-    const response = await client.callTool({
-      name: 'browser_snapshot',
-      arguments: { saveToFile: true },
-    });
-
-    expect(response.isError).toBeFalsy();
-    const text = response.content[0].text;
-
-    // Should show ngrok URL instead of local path
-    expect(text).toContain('https://');
-    expect(text).toMatch(/\.ngrok.*\.io|ngrok-free\.(app|dev)/);
+    expect(text).toContain('Invalid');
   });
 
-  test('browser_request_upload returns upload URL when ngrok enabled', async ({ startClient }) => {
-    const { client } = await startClient({
-      args: ['--ngrok'],
-    });
-
-    const response = await client.callTool({
-      name: 'browser_request_upload',
-      arguments: { filename: 'test.pdf' },
-    });
-
-    expect(response.isError).toBeFalsy();
-    const text = response.content[0].text;
-    expect(text).toContain('Upload URL');
-    expect(text).toContain('Upload Token');
-    expect(text).toContain('https://');
-    expect(text).toContain('X-Upload-Token');
-  });
-
-  test('full upload flow: request_upload -> POST -> file available', async ({ startClient }) => {
-    const { client } = await startClient({
-      args: ['--ngrok'],
-    });
-
+  test('full upload flow: request_upload -> POST -> file available', async ({ client }) => {
     // Step 1: Get upload URL
     const uploadResponse = await client.callTool({
       name: 'browser_request_upload',
@@ -282,7 +200,7 @@ test.describe('ngrok enabled (requires NGROK_AUTHTOKEN)', () => {
     const text = uploadResponse.content[0].text;
 
     // Extract upload URL and token from response
-    const urlMatch = text.match(/\*\*Upload URL:\*\* (https:\/\/[^\s]+)/);
+    const urlMatch = text.match(/\*\*Upload URL:\*\* (http:\/\/[^\s]+)/);
     const tokenMatch = text.match(/\*\*Upload Token:\*\* ([a-f0-9-]+)/);
     expect(urlMatch).toBeTruthy();
     expect(tokenMatch).toBeTruthy();
@@ -315,5 +233,56 @@ test.describe('ngrok enabled (requires NGROK_AUTHTOKEN)', () => {
     expect(jsonResponse.fileToken).toBeTruthy();
     expect(jsonResponse.filename).toBe('test.txt');
     expect(jsonResponse.bytes).toBe(16); // "Hello from test!".length
+  });
+});
+
+test.describe('MCP_FILE_SERVER_PORT env var', () => {
+  test('uses fixed port when MCP_FILE_SERVER_PORT is set', async ({ startClient }) => {
+    const fixedPort = 19876;
+    const { client } = await startClient({
+      env: { MCP_FILE_SERVER_PORT: String(fixedPort) },
+    });
+
+    const response = await client.callTool({
+      name: 'browser_request_upload',
+      arguments: { filename: 'test.txt' },
+    });
+
+    expect(response.isError).toBeFalsy();
+    const text = response.content[0].text;
+    expect(text).toContain(`http://localhost:${fixedPort}`);
+  });
+});
+
+test.describe('download token expiry', () => {
+  // Note: This test is designed to check token expiry logic.
+  // In production, tokens expire after 1 hour. For testing, we just verify
+  // that the token validation mechanism works.
+
+  test('expired tokens return 404', async ({ client, server }) => {
+    // This test validates that requesting a non-existent/expired token returns 404
+    server.setRoute('/expiry-test', (req, res) => {
+      res.end('<html><body><p>Expiry test</p></body></html>');
+    });
+
+    await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/expiry-test' } });
+    const response = await client.callTool({
+      name: 'browser_snapshot',
+      arguments: { saveToFile: true },
+    });
+
+    expect(response.isError).toBeFalsy();
+    const text = response.content[0].text;
+
+    // Extract the download URL (format: /downloads/{token}/{filename})
+    const urlMatch = text.match(/http:\/\/localhost:(\d+)\/downloads\/[a-f0-9-]+\/[^\s]+/);
+    expect(urlMatch).toBeTruthy();
+    const port = urlMatch![1];
+
+    // Try to access a non-existent token (simulates expired token)
+    const fakeToken = '00000000-0000-0000-0000-000000000000';
+    const fakeUrl = `http://localhost:${port}/downloads/${fakeToken}/fake-file.txt`;
+    const fetchResponse = await fetch(fakeUrl);
+    expect(fetchResponse.status).toBe(404);
   });
 });
