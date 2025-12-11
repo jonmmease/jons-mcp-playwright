@@ -19,7 +19,6 @@ import { filterSnapshot, extractSubtree, estimateTokens, parseSnapshot, countEle
 import { SnapshotCache } from './snapshot-cache.js';
 import { saveToFile } from './utils/file-output.js';
 import { LocalhostServer } from './utils/localhost-server.js';
-import { generateCrosshairsScript, generateRemoveCrosshairsScript, generateCoordinateExplanation } from './visual-feedback/screenshot-crosshairs.js';
 
 // Mouse tools that should trigger visual feedback
 const MOUSE_CLICK_TOOLS = new Set([
@@ -204,26 +203,6 @@ export class EnhancedBackend {
       }
     }
 
-    // Extend browser_take_screenshot with cursor_coordinates parameter
-    const screenshotTool = tools.find(t => t.name === 'browser_take_screenshot');
-    if (screenshotTool && screenshotTool.inputSchema) {
-      screenshotTool.inputSchema = {
-        ...screenshotTool.inputSchema,
-        properties: {
-          ...screenshotTool.inputSchema.properties,
-          cursor_coordinates: {
-            type: 'object',
-            description: 'Draw crosshairs at specified viewport coordinates for position debugging. Includes cursor arrow, horizontal/vertical lines, diagonal lines (+/-45 degrees), and colored distance circles (Red=10px, Orange=20px, Yellow=50px, Green=100px, Blue=200px, Purple=500px). Coordinates are CSS pixels relative to viewport origin (0,0 = top-left). Does NOT move the virtual cursor.',
-            properties: {
-              x: { type: 'number', description: 'X coordinate (CSS pixels from left edge of viewport)' },
-              y: { type: 'number', description: 'Y coordinate (CSS pixels from top edge of viewport)' },
-            },
-            required: ['x', 'y'],
-          },
-        },
-      };
-    }
-
     // Extend browser_file_upload with fileTokens parameter
     const fileUploadTool = tools.find(t => t.name === 'browser_file_upload');
     if (fileUploadTool && fileUploadTool.inputSchema) {
@@ -384,21 +363,16 @@ Original error: ${message}`,
   }
 
   /**
-   * Handle browser_take_screenshot with optional crosshairs overlay
-   * @param {Object} args - Tool arguments (may include cursor_coordinates)
+   * Handle browser_take_screenshot with visual feedback overlay hiding
+   * @param {Object} args - Tool arguments
    * @param {Function} progress - Progress callback
    * @returns {Promise<Object>} Screenshot result
    */
   async _handleScreenshot(args, progress) {
-    const { cursor_coordinates, ...screenshotArgs } = args;
-
     // Only hide/show if visual feedback is enabled
     const visualFeedbackEnabled = process.env.JONS_MCP_SHOW_ACTIONS !== 'off';
-    const hasCrosshairs = cursor_coordinates &&
-      typeof cursor_coordinates.x === 'number' &&
-      typeof cursor_coordinates.y === 'number';
 
-    // Always hide live cursor overlay before screenshot (we'll draw our own crosshairs if needed)
+    // Hide live cursor overlay before screenshot
     if (visualFeedbackEnabled) {
       try {
         await this._inner.callTool('browser_evaluate', {
@@ -409,36 +383,11 @@ Original error: ${message}`,
       }
     }
 
-    // Inject crosshairs if coordinates provided
-    if (hasCrosshairs) {
-      try {
-        const script = generateCrosshairsScript(cursor_coordinates.x, cursor_coordinates.y);
-        await this._inner.callTool('browser_evaluate', {
-          function: `() => { ${script} }`,
-        });
-      } catch (err) {
-        // Log but continue - crosshairs are non-critical
-        console.error('[screenshot] Failed to inject crosshairs:', err.message);
-      }
-    }
-
     // Take screenshot
     let result;
     try {
-      result = await this._inner.callTool('browser_take_screenshot', screenshotArgs, progress);
+      result = await this._inner.callTool('browser_take_screenshot', args, progress);
     } finally {
-      // Remove crosshairs after screenshot
-      if (hasCrosshairs) {
-        try {
-          const removeScript = generateRemoveCrosshairsScript();
-          await this._inner.callTool('browser_evaluate', {
-            function: `() => { ${removeScript} }`,
-          });
-        } catch {
-          // Silently ignore
-        }
-      }
-
       // Restore live cursor overlay
       if (visualFeedbackEnabled) {
         try {
@@ -448,15 +397,6 @@ Original error: ${message}`,
         } catch {
           // Silently ignore - overlay may not exist
         }
-      }
-    }
-
-    // Add coordinate system explanation to response
-    if (hasCrosshairs && result && !result.isError) {
-      const explanation = generateCoordinateExplanation(cursor_coordinates.x, cursor_coordinates.y);
-      // Append explanation to first text content
-      if (result.content && result.content[0] && result.content[0].type === 'text') {
-        result.content[0].text = (result.content[0].text || '') + explanation;
       }
     }
 

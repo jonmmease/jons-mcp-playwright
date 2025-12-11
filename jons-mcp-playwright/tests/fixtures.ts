@@ -145,7 +145,7 @@ export const test = baseTest.extend<TestFixtures, WorkerFixtures>({
 
   _workerServers: [
     async ({}, use, workerInfo) => {
-      const port = 9000 + workerInfo.workerIndex * 2;
+      const port = 9100 + workerInfo.workerIndex * 2;
       const server = await SimpleTestServer.create(port);
       await use({ server });
       await server.stop();
