@@ -19,6 +19,7 @@ import { filterSnapshot, extractSubtree, estimateTokens, parseSnapshot, countEle
 import { SnapshotCache } from './snapshot-cache.js';
 import { saveToFile } from './utils/file-output.js';
 import { LocalhostServer } from './utils/localhost-server.js';
+import { scaleToLogicalPixels } from './utils/image-scale.js';
 
 // Mouse tools that should trigger visual feedback
 const MOUSE_CLICK_TOOLS = new Set([
@@ -203,6 +204,12 @@ export class EnhancedBackend {
       }
     }
 
+    // Remove fullPage from browser_take_screenshot (we only support viewport/element screenshots)
+    const screenshotTool = tools.find(t => t.name === 'browser_take_screenshot');
+    if (screenshotTool && screenshotTool.inputSchema?.properties) {
+      delete screenshotTool.inputSchema.properties.fullPage;
+    }
+
     // Extend browser_file_upload with fileTokens parameter
     const fileUploadTool = tools.find(t => t.name === 'browser_file_upload');
     if (fileUploadTool && fileUploadTool.inputSchema) {
@@ -364,6 +371,7 @@ Original error: ${message}`,
 
   /**
    * Handle browser_take_screenshot with visual feedback overlay hiding
+   * and scaling to logical pixel coordinates
    * @param {Object} args - Tool arguments
    * @param {Function} progress - Progress callback
    * @returns {Promise<Object>} Screenshot result
@@ -383,6 +391,25 @@ Original error: ${message}`,
       }
     }
 
+    // Get viewport dimensions for scaling viewport screenshots
+    // Note: Element screenshots use the element's bounding box dimensions
+    let targetWidth, targetHeight;
+    const isViewportScreenshot = !args.ref;
+
+    if (isViewportScreenshot) {
+      try {
+        const viewportResult = await this._inner.callTool('browser_evaluate', {
+          function: `() => JSON.stringify({ width: window.innerWidth, height: window.innerHeight })`,
+        });
+        const viewportText = viewportResult.content?.[0]?.text || '{}';
+        const viewport = JSON.parse(viewportText);
+        targetWidth = viewport.width;
+        targetHeight = viewport.height;
+      } catch {
+        // If we can't get viewport, skip scaling
+      }
+    }
+
     // Take screenshot
     let result;
     try {
@@ -396,6 +423,21 @@ Original error: ${message}`,
           });
         } catch {
           // Silently ignore - overlay may not exist
+        }
+      }
+    }
+
+    // Scale viewport screenshots to logical pixel coordinates
+    // Element screenshots are not scaled (they use the element's natural dimensions)
+    if (isViewportScreenshot && targetWidth && targetHeight && result && !result.isError && result.content) {
+      const imageContent = result.content.find(c => c.type === 'image');
+      if (imageContent && imageContent.data) {
+        try {
+          const imageBuffer = Buffer.from(imageContent.data, 'base64');
+          const { buffer: scaledBuffer } = scaleToLogicalPixels(imageBuffer, targetWidth, targetHeight);
+          imageContent.data = scaledBuffer.toString('base64');
+        } catch {
+          // If scaling fails, return original image
         }
       }
     }
