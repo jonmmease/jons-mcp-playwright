@@ -211,6 +211,34 @@ export class EnhancedBackend {
       delete screenshotTool.inputSchema.properties.fullPage;
     }
 
+    // Replace browser_console_messages schema with our enhanced filtering options
+    const consoleTool = tools.find(t => t.name === 'browser_console_messages');
+    if (consoleTool && consoleTool.inputSchema) {
+      consoleTool.inputSchema = {
+        type: 'object',
+        properties: {
+          type: {
+            type: 'string',
+            enum: ['all', 'error', 'warn', 'log', 'info', 'debug'],
+            description: 'Filter by message type. Default: "all"',
+          },
+          contains: {
+            type: 'string',
+            description: 'Simple case-insensitive substring match on message text',
+          },
+          pattern: {
+            type: 'string',
+            description: 'Regex pattern to filter message text',
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of messages to return (most recent). Default: 500',
+          },
+        },
+      };
+      consoleTool.description = 'Returns filtered browser console messages. Supports filtering by type, substring match (contains), regex pattern, and limiting to most recent N messages.';
+    }
+
     // Extend browser_file_upload with fileTokens parameter
     const fileUploadTool = tools.find(t => t.name === 'browser_file_upload');
     if (fileUploadTool && fileUploadTool.inputSchema) {
@@ -506,6 +534,106 @@ curl -o "${filename}" "${publicUrl}"
   }
 
   /**
+   * Handle browser_console_messages with filtering
+   * @param {Object} args - Tool arguments { type?, contains?, pattern?, limit? }
+   * @param {Function} progress - Progress callback
+   * @returns {Promise<Object>} Filtered console messages
+   */
+  async _handleConsoleMessages(args, progress) {
+    const { type = 'all', contains, pattern, limit = 500 } = args;
+
+    // Call upstream to get all messages
+    const result = await this._inner.callTool('browser_console_messages', {}, progress);
+
+    // If error or no content, return as-is
+    if (result.isError || !result.content) {
+      return result;
+    }
+
+    // Extract the text content
+    const textPart = result.content.find(c => c.type === 'text');
+    if (!textPart || !textPart.text) {
+      return result;
+    }
+
+    // Parse messages from the response
+    // Format is typically: "[type] message" per line
+    const lines = textPart.text.split('\n').filter(line => line.trim());
+
+    // Map our type names to upstream type names (uppercase in output)
+    const typeMap = {
+      'error': 'ERROR',
+      'warn': 'WARNING',
+      'log': 'LOG',
+      'info': 'INFO',
+      'debug': 'DEBUG',
+    };
+
+    // Filter messages
+    let filteredLines = lines;
+
+    // Type filter
+    if (type !== 'all') {
+      const targetType = typeMap[type] || type.toUpperCase();
+      filteredLines = filteredLines.filter(line => {
+        // Match [TYPE] at start of line (case-insensitive)
+        const match = line.match(/^\[(\w+)\]/i);
+        return match && match[1].toUpperCase() === targetType;
+      });
+    }
+
+    // Contains filter (case-insensitive substring)
+    if (contains) {
+      const lowerContains = contains.toLowerCase();
+      filteredLines = filteredLines.filter(line =>
+        line.toLowerCase().includes(lowerContains)
+      );
+    }
+
+    // Pattern filter (regex on message text)
+    if (pattern) {
+      try {
+        const regex = new RegExp(pattern);
+        filteredLines = filteredLines.filter(line => regex.test(line));
+      } catch (e) {
+        return {
+          content: [{ type: 'text', text: `Invalid regex pattern: ${e.message}` }],
+          isError: true,
+        };
+      }
+    }
+
+    // Limit filter (most recent N messages)
+    if (limit && filteredLines.length > limit) {
+      filteredLines = filteredLines.slice(-limit);
+    }
+
+    // Build response
+    const messageCount = filteredLines.length;
+    const filterInfo = [];
+    if (type !== 'all') filterInfo.push(`type=${type}`);
+    if (contains) filterInfo.push(`contains="${contains}"`);
+    if (pattern) filterInfo.push(`pattern=/${pattern}/`);
+    if (limit !== 500) filterInfo.push(`limit=${limit}`);
+
+    let responseText;
+    if (messageCount === 0) {
+      responseText = filterInfo.length > 0
+        ? `No console messages matching filters (${filterInfo.join(', ')})`
+        : 'No console messages';
+    } else {
+      const header = filterInfo.length > 0
+        ? `Console messages (${messageCount} matching ${filterInfo.join(', ')}):`
+        : `Console messages (${messageCount}):`;
+      responseText = `${header}\n\n${filteredLines.join('\n')}`;
+    }
+
+    return {
+      content: [{ type: 'text', text: responseText }],
+    };
+  }
+
+  /**
    * Call a tool
    * Intercepts browser_snapshot for filtering, handles new tools
    * @param {string} name - Tool name
@@ -548,6 +676,10 @@ curl -o "${filename}" "${publicUrl}"
     if (name === 'browser_take_screenshot') {
       // Screenshot handler already returns URL, no need for _postProcessResult
       result = await this._handleScreenshot(args, progress);
+      return result;
+    }
+    if (name === 'browser_console_messages') {
+      result = await this._handleConsoleMessages(args, progress);
       return result;
     }
 
