@@ -9,6 +9,7 @@
  */
 
 import path from 'path';
+import fs from 'fs';
 import { schema as getImageSchema } from './tools/get-image.js';
 import { schema as getTextSchema } from './tools/get-text.js';
 import { schema as getTableSchema } from './tools/get-table.js';
@@ -402,7 +403,15 @@ Original error: ${message}`,
           function: `() => JSON.stringify({ width: window.innerWidth, height: window.innerHeight })`,
         });
         const viewportText = viewportResult.content?.[0]?.text || '{}';
-        const viewport = JSON.parse(viewportText);
+        // Result may be in markdown format: ### Result\n"..."\n
+        const jsonMatch = viewportText.match(/### Result\n"(.+?)"\n/s);
+        let viewport;
+        if (jsonMatch) {
+          const jsonStr = jsonMatch[1].replace(/\\"/g, '"');
+          viewport = JSON.parse(jsonStr);
+        } else {
+          viewport = JSON.parse(viewportText);
+        }
         targetWidth = viewport.width;
         targetHeight = viewport.height;
       } catch {
@@ -427,17 +436,68 @@ Original error: ${message}`,
       }
     }
 
-    // Scale viewport screenshots to logical pixel coordinates
-    // Element screenshots are not scaled (they use the element's natural dimensions)
-    if (isViewportScreenshot && targetWidth && targetHeight && result && !result.isError && result.content) {
+    // Process screenshot: scale to CSS pixels and return URL instead of embedded image
+    if (result && !result.isError && result.content) {
       const imageContent = result.content.find(c => c.type === 'image');
+      const textContent = result.content.find(c => c.type === 'text');
+
       if (imageContent && imageContent.data) {
         try {
-          const imageBuffer = Buffer.from(imageContent.data, 'base64');
-          const { buffer: scaledBuffer } = scaleToLogicalPixels(imageBuffer, targetWidth, targetHeight);
-          imageContent.data = scaledBuffer.toString('base64');
+          let imageBuffer = Buffer.from(imageContent.data, 'base64');
+          let finalWidth, finalHeight;
+
+          // Scale viewport screenshots to CSS pixel coordinates
+          // Element screenshots are not scaled (they use the element's natural dimensions)
+          if (isViewportScreenshot && targetWidth && targetHeight) {
+            const { buffer: scaledBuffer } = scaleToLogicalPixels(imageBuffer, targetWidth, targetHeight);
+            imageBuffer = scaledBuffer;
+            finalWidth = targetWidth;
+            finalHeight = targetHeight;
+          } else {
+            // For element screenshots, read dimensions from buffer
+            const { PNG } = await import('pngjs');
+            const png = PNG.sync.read(imageBuffer);
+            finalWidth = png.width;
+            finalHeight = png.height;
+          }
+
+          // Extract saved file path from response
+          let savedFilePath = null;
+          if (textContent && textContent.text) {
+            const pathMatch = textContent.text.match(/saved it as ([^\n]+)/);
+            if (pathMatch) {
+              savedFilePath = pathMatch[1].trim();
+              // Update saved file with scaled image
+              try {
+                await fs.promises.writeFile(savedFilePath, imageBuffer);
+              } catch {
+                // If we can't update the file, continue
+              }
+            }
+          }
+
+          // Register with localhost server and get download URL
+          const server = await this._ensureLocalhostServer();
+          const filename = savedFilePath ? path.basename(savedFilePath) : 'screenshot.png';
+          const { publicUrl } = server.registerDownload(savedFilePath, filename);
+
+          // Build new text-only response with URL
+          const screenshotType = isViewportScreenshot ? 'viewport' : 'element';
+          const newText = `Screenshot captured (${screenshotType}, ${finalWidth} × ${finalHeight} pixels)
+
+Download URL: ${publicUrl}
+
+To download:
+\`\`\`bash
+curl -o "${filename}" "${publicUrl}"
+\`\`\``;
+
+          // Return text-only response (remove image content)
+          return {
+            content: [{ type: 'text', text: newText }]
+          };
         } catch {
-          // If scaling fails, return original image
+          // If processing fails, return original result
         }
       }
     }
@@ -486,8 +546,9 @@ Original error: ${message}`,
       return this._postProcessResult(result);
     }
     if (name === 'browser_take_screenshot') {
+      // Screenshot handler already returns URL, no need for _postProcessResult
       result = await this._handleScreenshot(args, progress);
-      return this._postProcessResult(result);
+      return result;
     }
 
     // Auto-clear highlights before browser actions that indicate user is moving on
