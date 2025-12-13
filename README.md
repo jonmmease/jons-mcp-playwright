@@ -31,6 +31,15 @@ This fork wraps the standard `@playwright/mcp` logic and adds filtering and new 
 - `--adblock=MODE` - Modes: `ads`, `tracking` (default), `full`, `custom`
 - `--adblock-lists=URL` - Custom filter lists (comma-separated, for `custom` mode)
 
+**Vision Capability** (`--playwright-caps=vision`):
+- Enables coordinate-based tools (`browser_mouse_click_xy`, `browser_mouse_move_xy`, etc.)
+- `browser_locate_in_screenshot` - Uses Gemini AI to find UI elements by description and returns pixel coordinates
+- Requirements:
+  - `GEMINI_API_KEY` - Google Gemini API key ([get one here](https://aistudio.google.com/apikey))
+  - `uv` - Python package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+- Optional:
+  - `UV_PATH` - Custom path to uv executable (default: `uv`)
+
 **CLI Options** (for `jons-mcp-playwright` subproject):
 - `--include-developer-tools` - Show hidden tools (tracing, locator generation, verification)
 
