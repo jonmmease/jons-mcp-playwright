@@ -241,5 +241,19 @@ test.describe('browser_locate_in_screenshot integration', () => {
     expect(locateText).toContain('x=');
     expect(locateText).toContain('y=');
     expect(locateText).toContain('browser_mouse_click_xy');
+
+    // Should include annotated image URL
+    expect(locateText).toContain('Annotated image:');
+    const annotatedUrlMatch = locateText.match(/Annotated image: (http[^\s]+)/);
+    expect(annotatedUrlMatch).toBeTruthy();
+    const annotatedImageUrl = annotatedUrlMatch![1];
+    expect(annotatedImageUrl).toContain('http://localhost:');
+    expect(annotatedImageUrl).toContain('_annotated.png');
+
+    // Verify the annotated image URL is fetchable
+    const response = await fetch(annotatedImageUrl);
+    expect(response.ok).toBe(true);
+    const contentType = response.headers.get('content-type');
+    expect(contentType).toContain('image/png');
   });
 });

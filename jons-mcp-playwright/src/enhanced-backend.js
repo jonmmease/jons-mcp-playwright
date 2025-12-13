@@ -2260,25 +2260,35 @@ Then set it:
       // Run Python script via uv
       const result = await runPythonScript(scriptPath, scriptArgs);
 
-      // Clean up annotated image unless debug mode
-      if (!debug && result.annotated_image) {
+      // Register annotated image with localhost server if available
+      let annotatedImageUrl = null;
+      if (result.annotated_image) {
         try {
-          fs.unlinkSync(result.annotated_image);
+          const server = await this._ensureLocalhostServer();
+          const filename = path.basename(result.annotated_image);
+          const { publicUrl } = server.registerDownload(result.annotated_image, filename);
+          annotatedImageUrl = publicUrl;
         } catch (e) {
-          // Ignore cleanup errors
+          // Ignore registration errors, just won't have URL
         }
       }
 
       // Format response based on detection result
       if (result.detected) {
-        let responseText = `Element located at coordinates (x=${result.x}, y=${result.y}) in the screenshot.
+        let responseText = `Element located at coordinates (x=${result.x}, y=${result.y}) in the screenshot.`;
+
+        if (annotatedImageUrl) {
+          responseText += `\n\nAnnotated image: ${annotatedImageUrl}`;
+        }
+
+        responseText += `
 
 These coordinates are in CSS pixel space and can be used with:
 - browser_mouse_click_xy to click the element
 - browser_mouse_move_xy to hover over the element`;
 
         if (debug && result.annotated_image) {
-          responseText += `\n\nAnnotated image saved to: ${result.annotated_image}`;
+          responseText += `\n\nDebug mask saved to: /tmp/screenshot_locator_debug_mask.png`;
         }
 
         return {
@@ -2293,8 +2303,8 @@ Try a more specific description or ensure the element is visible in the screensh
           errorText += `\n\nDetails: ${result.error}`;
         }
 
-        if (debug && result.annotated_image) {
-          errorText += `\n\nAnnotated image saved to: ${result.annotated_image}`;
+        if (annotatedImageUrl) {
+          errorText += `\n\nAnnotated image (for debugging): ${annotatedImageUrl}`;
         }
 
         return {
