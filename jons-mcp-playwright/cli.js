@@ -83,6 +83,17 @@ Environment Variables:
   JONS_MCP_ADBLOCK=off       Disable ad blocking at runtime
   JONS_MCP_SHOW_ACTIONS=off  Disable visual feedback at runtime
   NGROK_AUTHTOKEN            Required when using --ngrok
+
+Vision Capability (--playwright-caps=vision):
+  Enables coordinate-based tools including browser_locate_in_screenshot
+  which uses AI vision to find UI elements by description.
+
+  Requirements:
+    GEMINI_API_KEY           Google Gemini API key (get from https://aistudio.google.com/apikey)
+    uv                       Python package manager (install: curl -LsSf https://astral.sh/uv/install.sh | sh)
+
+  Optional:
+    UV_PATH                  Custom path to uv executable (default: uv)
 `);
     process.exit(0);
   }

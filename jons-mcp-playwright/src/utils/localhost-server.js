@@ -550,6 +550,45 @@ export class LocalhostServer {
   }
 
   /**
+   * Resolve a download token to its local file path
+   * Validates token exists, checks TTL expiration, and verifies filename
+   *
+   * @param {string} token - The download token from URL
+   * @param {string} filename - The filename from URL (for validation)
+   * @returns {{ localPath: string, filename: string }} File info
+   * @throws {Error} If token is invalid, expired, or filename doesn't match
+   */
+  resolveDownloadToken(token, filename) {
+    // Check if token exists
+    const download = this._downloads.get(token);
+    if (!download) {
+      throw new Error('Download token not found or has been invalidated');
+    }
+
+    // Check if token has expired (same TTL check as _handleDownload)
+    if (Date.now() - download.registeredAt > this._downloadTokenTTL) {
+      this._downloads.delete(token);
+      throw new Error('Download token has expired');
+    }
+
+    // Validate filename matches (security check)
+    if (filename !== download.filename) {
+      throw new Error('Filename does not match download token');
+    }
+
+    // Verify file still exists
+    if (!existsSync(download.localPath)) {
+      this._downloads.delete(token);
+      throw new Error('Downloaded file no longer exists');
+    }
+
+    return {
+      localPath: download.localPath,
+      filename: download.filename,
+    };
+  }
+
+  /**
    * Register a new upload token
    * @param {Object} options - Options for the upload
    * @param {string} [options.filename] - Expected filename (optional)

@@ -137,6 +137,11 @@ export async function createConnection(config = {}, contextGetter) {
     },
   };
 
+  // Update mergedConfig with the final playwright capabilities
+  // This allows EnhancedBackend to check if vision capability is enabled
+  mergedConfig.playwright = mergedConfig.playwright || {};
+  mergedConfig.playwright.capabilities = playwrightConfig.capabilities;
+
   // Wrap with our EnhancedBackend
   const enhancedBackend = new EnhancedBackend(mergedConfig, innerBackend);
 

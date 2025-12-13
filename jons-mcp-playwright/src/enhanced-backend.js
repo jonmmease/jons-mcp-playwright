@@ -10,12 +10,19 @@
 
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { schema as getImageSchema } from './tools/get-image.js';
 import { schema as getTextSchema } from './tools/get-text.js';
 import { schema as getTableSchema } from './tools/get-table.js';
 import { schema as getBoundsSchema } from './tools/get-bounds.js';
 import { highlightSchema, clearHighlightsSchema } from './tools/highlight.js';
 import { schema as requestUploadSchema } from './tools/request-upload.js';
+import { schema as locateInScreenshotSchema } from './tools/locate-in-screenshot.js';
+import { runPythonScript } from './utils/run-python.js';
+
+// ESM-safe __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 import { filterSnapshot, extractSubtree, estimateTokens, parseSnapshot, countElements } from './snapshot-filter.js';
 import { SnapshotCache } from './snapshot-cache.js';
 import { saveToFile } from './utils/file-output.js';
@@ -272,7 +279,32 @@ export class EnhancedBackend {
       });
     }
 
+    // Add browser_locate_in_screenshot only when vision capability is enabled
+    // This tool requires vision capability because it produces coordinates for use with browser_mouse_*_xy
+    if (this._hasVisionCapability()) {
+      tools.push({
+        name: locateInScreenshotSchema.name,
+        description: locateInScreenshotSchema.description,
+        inputSchema: locateInScreenshotSchema.inputSchema,
+        annotations: {
+          title: 'locate in screenshot',
+          readOnlyHint: true,
+          openWorldHint: true,
+        },
+      });
+    }
+
     return tools;
+  }
+
+  /**
+   * Check if vision capability is enabled
+   * Vision is enabled via --playwright-caps=vision
+   * @returns {boolean}
+   */
+  _hasVisionCapability() {
+    const caps = this.config.playwright?.capabilities;
+    return Array.isArray(caps) && caps.includes('vision');
   }
 
   /**
@@ -680,6 +712,25 @@ curl -o "${filename}" "${publicUrl}"
     }
     if (name === 'browser_console_messages') {
       result = await this._handleConsoleMessages(args, progress);
+      return result;
+    }
+    if (name === 'browser_locate_in_screenshot') {
+      // Check vision capability before handling
+      if (!this._hasVisionCapability()) {
+        return {
+          content: [{
+            type: 'text',
+            text: `browser_locate_in_screenshot requires vision capability.
+
+Enable it with: --playwright-caps=vision
+
+Example:
+  npx jons-mcp-playwright --playwright-caps=vision`,
+          }],
+          isError: true,
+        };
+      }
+      result = await this._handleLocateInScreenshot(args);
       return result;
     }
 
@@ -2007,6 +2058,168 @@ The response will be JSON: \`{"success": true, "fileToken": "...", "filename": "
     } catch (error) {
       return {
         content: [{ type: 'text', text: `Failed to create upload URL: ${error.message}` }],
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * Resolve a screenshot URL to its local file path
+   * Validates URL format, host, and token
+   *
+   * @param {string} screenshotUrl - The download URL from browser_take_screenshot
+   * @returns {{ localPath: string, filename: string }} File info
+   * @throws {Error} If URL is invalid or token cannot be resolved
+   */
+  _resolveScreenshotUrl(screenshotUrl) {
+    // Parse URL
+    let url;
+    try {
+      url = new URL(screenshotUrl);
+    } catch (e) {
+      throw new Error(
+        `Invalid screenshot URL format: ${screenshotUrl}\n` +
+        `Expected format: http://localhost:PORT/downloads/TOKEN/filename.png`
+      );
+    }
+
+    // Validate host matches localhost server
+    if (!this._localhostServer) {
+      throw new Error(
+        'Screenshot server not initialized. Take a screenshot first with browser_take_screenshot.'
+      );
+    }
+
+    const serverUrl = new URL(this._localhostServer.publicBaseUrl);
+    // Allow any host since ngrok URLs will differ
+    // Just validate it's a downloads path
+    if (!url.pathname.startsWith('/downloads/')) {
+      throw new Error(
+        `Invalid screenshot URL path: ${url.pathname}\n` +
+        `Expected path format: /downloads/TOKEN/filename.png`
+      );
+    }
+
+    // Extract token and filename from path
+    const pathMatch = url.pathname.match(/^\/downloads\/([^/]+)\/(.+)$/);
+    if (!pathMatch) {
+      throw new Error(
+        `Cannot parse screenshot URL: ${screenshotUrl}\n` +
+        `Expected format: http://HOST/downloads/TOKEN/filename.png`
+      );
+    }
+
+    const [, token, encodedFilename] = pathMatch;
+    const filename = decodeURIComponent(encodedFilename);
+
+    // Use LocalhostServer's resolveDownloadToken method for proper validation
+    return this._localhostServer.resolveDownloadToken(token, filename);
+  }
+
+  /**
+   * Handle browser_locate_in_screenshot tool
+   * Uses Gemini vision to find UI elements by description
+   *
+   * @param {Object} args - { screenshotUrl: string, description: string, debug?: boolean }
+   * @returns {Promise<Object>} MCP response with coordinates or error
+   */
+  async _handleLocateInScreenshot(args) {
+    const { screenshotUrl, description, debug = false } = args;
+
+    // Validate required parameters
+    if (!screenshotUrl) {
+      return {
+        content: [{ type: 'text', text: 'browser_locate_in_screenshot requires screenshotUrl parameter' }],
+        isError: true,
+      };
+    }
+    if (!description) {
+      return {
+        content: [{ type: 'text', text: 'browser_locate_in_screenshot requires description parameter' }],
+        isError: true,
+      };
+    }
+
+    // Check for GEMINI_API_KEY
+    if (!process.env.GEMINI_API_KEY) {
+      return {
+        content: [{
+          type: 'text',
+          text: `GEMINI_API_KEY environment variable is required for browser_locate_in_screenshot.
+
+Get an API key at: https://aistudio.google.com/apikey
+
+Then set it:
+  export GEMINI_API_KEY=your-api-key-here`,
+        }],
+        isError: true,
+      };
+    }
+
+    try {
+      // Ensure localhost server is running (for URL resolution)
+      await this._ensureLocalhostServer();
+
+      // Resolve screenshot URL to local file path
+      const { localPath } = this._resolveScreenshotUrl(screenshotUrl);
+
+      // Path to Python script
+      const scriptPath = path.join(__dirname, 'locate', 'locate.py');
+
+      // Build args for Python script
+      const scriptArgs = [localPath, description];
+      if (debug) {
+        scriptArgs.push('--debug');
+      }
+
+      // Run Python script via uv
+      const result = await runPythonScript(scriptPath, scriptArgs);
+
+      // Clean up annotated image unless debug mode
+      if (!debug && result.annotated_image) {
+        try {
+          fs.unlinkSync(result.annotated_image);
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+      }
+
+      // Format response based on detection result
+      if (result.detected) {
+        let responseText = `Element located at coordinates (x=${result.x}, y=${result.y}) in the screenshot.
+
+These coordinates are in CSS pixel space and can be used with:
+- browser_mouse_click_xy to click the element
+- browser_mouse_move_xy to hover over the element`;
+
+        if (debug && result.annotated_image) {
+          responseText += `\n\nAnnotated image saved to: ${result.annotated_image}`;
+        }
+
+        return {
+          content: [{ type: 'text', text: responseText }],
+        };
+      } else {
+        let errorText = `Could not locate element matching: "${description}"
+
+Try a more specific description or ensure the element is visible in the screenshot.`;
+
+        if (result.error) {
+          errorText += `\n\nDetails: ${result.error}`;
+        }
+
+        if (debug && result.annotated_image) {
+          errorText += `\n\nAnnotated image saved to: ${result.annotated_image}`;
+        }
+
+        return {
+          content: [{ type: 'text', text: errorText }],
+          isError: true,
+        };
+      }
+    } catch (error) {
+      return {
+        content: [{ type: 'text', text: `Failed to locate element: ${error.message}` }],
         isError: true,
       };
     }
