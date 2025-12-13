@@ -2057,6 +2057,7 @@ The response will be JSON: \`{"success": true, "fileToken": "...", "filename": "
     if (!this._localhostServer) {
       this._localhostServer = new LocalhostServer({
         tempDir: this.config.tempDir,
+        ngrok: this.config.ngrok,
       });
     }
     if (!this._localhostServer.isRunning) {

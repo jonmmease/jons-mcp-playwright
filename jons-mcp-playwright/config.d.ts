@@ -74,6 +74,16 @@ interface Config {
    */
   adblockLists?: string;
 
+  // ============ Ngrok tunneling ============
+
+  /**
+   * Serve downloads via ngrok tunnel instead of localhost
+   * Required for Claude Desktop which runs in a sandbox that can't access localhost
+   * Requires NGROK_AUTHTOKEN environment variable to be set
+   * @default false
+   */
+  ngrok?: boolean;
+
   // ============ Playwright passthrough ============
 
   /**

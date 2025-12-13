@@ -4,6 +4,7 @@
  * Provides:
  * - HTTP server to serve downloaded files
  * - HTTP server to accept file uploads from sandboxed environments
+ * - Optional ngrok tunnel for public URL access (for Claude Desktop compatibility)
  * - Security via session-scoped token whitelists with TTL
  * - Lazy initialization (only starts on first download/upload)
  * - Automatic cleanup of expired downloads and uploads
@@ -61,10 +62,12 @@ export class LocalhostServer {
    * @param {number} [config.maxUploadSize] - Maximum upload size in bytes (default 50MB)
    * @param {number} [config.uploadTokenTTL] - Upload token TTL in ms (default 5 minutes)
    * @param {number} [config.downloadTokenTTL] - Download token TTL in ms (default 1 hour)
+   * @param {boolean} [config.ngrok] - Use ngrok tunnel for public URL (requires NGROK_AUTHTOKEN)
    */
   constructor(config = {}) {
     this.config = config;
     this._server = null;
+    this._listener = null; // ngrok listener (if enabled)
     this._publicBaseUrl = null;
     this._downloads = new Map(); // token -> { localPath, filename, registeredAt }
     this._uploadTokens = new Map(); // uploadToken -> { createdAt, filename, maxBytes }
@@ -94,7 +97,7 @@ export class LocalhostServer {
 
   /**
    * Ensure the manager is running (lazy initialization)
-   * Creates HTTP server on first call
+   * Creates HTTP server on first call, optionally with ngrok tunnel
    */
   async ensureRunning() {
     if (this._isRunning) {
@@ -118,7 +121,26 @@ export class LocalhostServer {
     });
 
     const actualPort = this._server.address().port;
-    this._publicBaseUrl = `http://localhost:${actualPort}`;
+
+    // If ngrok is enabled, start tunnel and use ngrok URL
+    if (this.config.ngrok) {
+      const ngrok = await import('@ngrok/ngrok');
+      try {
+        this._listener = await ngrok.forward({
+          addr: actualPort,
+          authtoken_from_env: true,
+        });
+        this._publicBaseUrl = this._listener.url();
+      } catch (error) {
+        // Clean up server if ngrok fails
+        this._server.close();
+        this._server = null;
+        throw new Error(`Failed to start ngrok tunnel: ${error.message}`);
+      }
+    } else {
+      this._publicBaseUrl = `http://localhost:${actualPort}`;
+    }
+
     this._isRunning = true;
 
     // Start periodic cleanup timer
@@ -620,6 +642,16 @@ export class LocalhostServer {
     if (this._cleanupTimer) {
       clearInterval(this._cleanupTimer);
       this._cleanupTimer = null;
+    }
+
+    // Close ngrok listener if present
+    if (this._listener) {
+      try {
+        await this._listener.close();
+      } catch (error) {
+        // Ignore close errors
+      }
+      this._listener = null;
     }
 
     // Close HTTP server

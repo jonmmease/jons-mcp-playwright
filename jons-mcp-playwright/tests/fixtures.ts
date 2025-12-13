@@ -108,6 +108,9 @@ export const test = baseTest.extend<TestFixtures, WorkerFixtures>({
         if (options.config.adblockLists) {
           args.push(`--adblock-lists=${options.config.adblockLists}`);
         }
+        if (options.config.ngrok) {
+          args.push('--ngrok');
+        }
       }
 
       const client = new Client({ name: 'test', version: '1.0.0' });

@@ -254,6 +254,38 @@ test.describe('MCP_FILE_SERVER_PORT env var', () => {
   });
 });
 
+// Tests for ngrok mode
+// These tests require NGROK_AUTHTOKEN and are skipped in CI
+test.describe('ngrok mode', () => {
+  const hasNgrokToken = !!process.env.NGROK_AUTHTOKEN;
+
+  test.skip(!hasNgrokToken, 'Requires NGROK_AUTHTOKEN environment variable');
+
+  test('when ngrok enabled, publicBaseUrl is ngrok URL', async ({ startClient, server }) => {
+    // Start client with ngrok enabled
+    const { client } = await startClient({ config: { ngrok: true } });
+
+    server.setRoute('/ngrok-test', (req, res) => {
+      res.end('<html><body><p>Ngrok test</p></body></html>');
+    });
+
+    await client.callTool({ name: 'browser_navigate', arguments: { url: server.PREFIX + '/ngrok-test' } });
+    const response = await client.callTool({
+      name: 'browser_snapshot',
+      arguments: { saveToFile: true },
+    });
+
+    expect(response.isError).toBeFalsy();
+    const text = response.content[0].text;
+
+    // Should show ngrok URL (not localhost)
+    expect(text).toContain('https://');
+    expect(text).toContain('.ngrok');
+    expect(text).toContain('/downloads/');
+    expect(text).not.toContain('http://localhost:');
+  });
+});
+
 test.describe('download token expiry', () => {
   // Note: This test is designed to check token expiry logic.
   // In production, tokens expire after 1 hour. For testing, we just verify
