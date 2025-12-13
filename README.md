@@ -1198,6 +1198,8 @@ http.createServer(async (req, res) => {
 <details>
 <summary><b>Coordinate-based (opt-in via --caps=vision)</b></summary>
 
+> **Note:** Use `browser_take_screenshot` followed by `browser_locate_in_screenshot` to get coordinates for these tools. The locate tool uses Gemini AI to find UI elements by description and returns pixel coordinates.
+
 <!-- NOTE: This has been generated via update-readme.js -->
 
 - **browser_mouse_click_xy**
