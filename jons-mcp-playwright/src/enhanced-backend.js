@@ -10,6 +10,7 @@
 
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import { fileURLToPath } from 'url';
 import { schema as getImageSchema } from './tools/get-image.js';
 import { schema as getTextSchema } from './tools/get-text.js';
@@ -1575,7 +1576,7 @@ Example:
 
         // Decode base64 and save to temp file
         const imageBuffer = Buffer.from(imgInfo.base64, 'base64');
-        const tempDir = this.config.tempDir || require('os').tmpdir();
+        const tempDir = this.config.tempDir || os.tmpdir();
         const savedFilePath = path.join(tempDir, `mcp-image-${Date.now()}-${filename}`);
         fs.writeFileSync(savedFilePath, imageBuffer);
 
