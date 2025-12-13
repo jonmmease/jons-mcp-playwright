@@ -241,12 +241,66 @@ test.describe('browser_screenshot_snapshot integration', () => {
     expect(text).toContain('Scale:');
     expect(text).toContain('Refs valid for:');
 
+    // Should include annotated image URL
+    expect(text).toContain('Annotated:');
+    expect(text).toMatch(/Annotated: http:\/\/localhost:\d+\/downloads\/[a-f0-9-]+\/screenshot_\d+_annotated\.png/);
+
     // Should include YAML-formatted elements with v-refs
     expect(text).toMatch(/\[ref=v\d+\]/);
 
     // Should detect common elements (may vary by model)
     // Just verify we got some structured output
     expect(text.length).toBeGreaterThan(100);
+  });
+
+  test('annotated image URL is downloadable and returns valid PNG', async ({ startClient, server }) => {
+    server.setRoute('/simple', (req, res) => {
+      res.end(`
+        <html>
+          <body style="padding: 50px;">
+            <h1>Test Heading</h1>
+            <button style="padding: 20px;">Big Button</button>
+          </body>
+        </html>
+      `);
+    });
+
+    const { client } = await startClient({
+      args: ['--playwright-caps=vision'],
+    });
+
+    await client.callTool({
+      name: 'browser_navigate',
+      arguments: { url: server.PREFIX + '/simple' },
+    });
+
+    const response = await client.callTool({
+      name: 'browser_screenshot_snapshot',
+      arguments: { description: 'A page with a heading and button' },
+    });
+
+    expect(response.isError).toBeFalsy();
+    const text = response.content?.[0]?.text || '';
+
+    // Extract annotated image URL
+    const urlMatch = text.match(/Annotated: (http:\/\/localhost:\d+\/downloads\/[^\s]+)/);
+    expect(urlMatch).toBeTruthy();
+
+    const annotatedUrl = urlMatch![1];
+
+    // Fetch the annotated image
+    const imageResponse = await fetch(annotatedUrl);
+    expect(imageResponse.ok).toBe(true);
+    expect(imageResponse.headers.get('content-type')).toContain('image/png');
+
+    // Verify it's a valid PNG (magic bytes)
+    const buffer = await imageResponse.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    // PNG magic bytes: 137 80 78 71 13 10 26 10
+    expect(bytes[0]).toBe(137);
+    expect(bytes[1]).toBe(80);  // P
+    expect(bytes[2]).toBe(78);  // N
+    expect(bytes[3]).toBe(71);  // G
   });
 
   test('v-ref click works after screenshot_snapshot', async ({ startClient, server }) => {

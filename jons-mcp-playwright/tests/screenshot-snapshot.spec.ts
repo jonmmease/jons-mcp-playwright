@@ -388,6 +388,32 @@ test.describe('YAML formatting', () => {
     expect(metadata).toContain('Warnings: 2');
   });
 
+  test('formatMetadata includes annotated image URL when provided', () => {
+    const metadata = formatMetadata({
+      width: 800,
+      height: 600,
+      deviceScaleFactor: 1,
+      ttlMs: 30000,
+      annotatedImageUrl: 'http://localhost:3000/downloads/abc123/screenshot_annotated.png',
+    });
+
+    expect(metadata).toContain('Image: 800x600px');
+    expect(metadata).toContain('Annotated: http://localhost:3000/downloads/abc123/screenshot_annotated.png');
+    // URL should be on its own line
+    expect(metadata).toMatch(/\nAnnotated:/);
+  });
+
+  test('formatMetadata omits annotated line when URL not provided', () => {
+    const metadata = formatMetadata({
+      width: 800,
+      height: 600,
+      deviceScaleFactor: 1,
+      ttlMs: 30000,
+    });
+
+    expect(metadata).not.toContain('Annotated:');
+  });
+
   test('formatVisionResponse combines metadata and YAML', () => {
     const elements = [
       { ref: 'v1', role: 'button', name: 'Test', bounding_box: [0, 0, 50, 100] },

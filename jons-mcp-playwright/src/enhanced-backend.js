@@ -2627,7 +2627,7 @@ Then set it:
       const scriptPath = path.join(__dirname, 'screenshot_snapshot.py');
 
       // Build args for Python script
-      const scriptArgs = [screenshotPath];
+      const scriptArgs = [screenshotPath, '--annotate'];
       if (description) {
         scriptArgs.push(`--hint=${description}`);
       }
@@ -2658,6 +2658,14 @@ Then set it:
       const filename = path.basename(screenshotPath);
       const { publicUrl } = server.registerDownload(screenshotPath, filename);
 
+      // Register annotated image if available
+      let annotatedImageUrl = null;
+      if (result.annotated_image) {
+        const annotatedFilename = path.basename(result.annotated_image);
+        const annotatedResult = server.registerDownload(result.annotated_image, annotatedFilename);
+        annotatedImageUrl = annotatedResult.publicUrl;
+      }
+
       // Cache all refs with coordinates
       this._visionRefCache.cacheElements(
         result.elements,
@@ -2676,6 +2684,7 @@ Then set it:
         deviceScaleFactor,
         ttlMs: this._visionRefCache.ttl,
         warnings: result.validation_warnings,
+        annotatedImageUrl,
       });
 
       return {

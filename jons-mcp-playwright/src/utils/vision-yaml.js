@@ -64,9 +64,10 @@ function quoteYamlString(str) {
  * @param {number} options.deviceScaleFactor - Device pixel ratio
  * @param {number} options.ttlMs - TTL in milliseconds
  * @param {string[]} [options.warnings] - Validation warnings
- * @returns {string} Formatted metadata line
+ * @param {string} [options.annotatedImageUrl] - URL to annotated image with bounding boxes
+ * @returns {string} Formatted metadata line(s)
  */
-export function formatMetadata({ width, height, deviceScaleFactor, ttlMs, warnings }) {
+export function formatMetadata({ width, height, deviceScaleFactor, ttlMs, warnings, annotatedImageUrl }) {
   const parts = [
     `Image: ${width}x${height}px`,
     `Scale: ${deviceScaleFactor}x`,
@@ -77,7 +78,13 @@ export function formatMetadata({ width, height, deviceScaleFactor, ttlMs, warnin
     parts.push(`Warnings: ${warnings.length}`);
   }
 
-  return parts.join(' | ');
+  let result = parts.join(' | ');
+
+  if (annotatedImageUrl) {
+    result += `\nAnnotated: ${annotatedImageUrl}`;
+  }
+
+  return result;
 }
 
 /**

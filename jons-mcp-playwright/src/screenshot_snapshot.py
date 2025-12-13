@@ -20,10 +20,21 @@ import os
 import sys
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 # Default model - can be overridden via --model
 MODEL = "gemini-2.0-flash-exp"
+
+# Okabe-Ito colorblind-friendly palette (RGB tuples, excluding black)
+OKABE_ITO_COLORS = [
+    (230, 159, 0),    # Orange
+    (86, 180, 233),   # Sky Blue
+    (0, 158, 115),    # Bluish Green
+    (240, 228, 66),   # Yellow
+    (0, 114, 178),    # Blue
+    (213, 94, 0),     # Vermillion
+    (204, 121, 167),  # Reddish Purple
+]
 
 # Standard ARIA roles (51 roles for canvas GUI support)
 ARIA_ROLES = [
@@ -140,6 +151,125 @@ def build_schema(depth=4):
     }
 
 
+def assign_refs(elements, counter=None):
+    """Assign v-prefixed refs to elements (v1, v2, ...) in tree order."""
+    if counter is None:
+        counter = {'value': 1}
+
+    for el in elements:
+        el['ref'] = f"v{counter['value']}"
+        counter['value'] += 1
+        if 'children' in el:
+            assign_refs(el['children'], counter)
+
+
+def draw_annotations(image_path, elements, output_path):
+    """Draw bounding boxes and ref labels on image.
+
+    Args:
+        image_path: Path to original image
+        elements: List of elements with ref and bounding_box
+        output_path: Path to save annotated image
+    """
+    # Open image and convert to RGBA for transparency support
+    img = Image.open(image_path).convert('RGBA')
+
+    # Create overlay for semi-transparent fills
+    overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+    draw_overlay = ImageDraw.Draw(overlay)
+
+    # Create draw context for borders and labels
+    draw = ImageDraw.Draw(img)
+
+    # Try to load a font, fall back to default
+    try:
+        # Try common system fonts
+        font = None
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/SFNSMono.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        ]
+        for fp in font_paths:
+            if Path(fp).exists():
+                font = ImageFont.truetype(fp, 14)
+                break
+        if font is None:
+            font = ImageFont.load_default()
+    except Exception:
+        font = ImageFont.load_default()
+
+    # Flatten elements to list with refs
+    def flatten(els, result=None):
+        if result is None:
+            result = []
+        for el in els:
+            result.append(el)
+            if 'children' in el:
+                flatten(el['children'], result)
+        return result
+
+    flat_elements = flatten(elements)
+
+    # Draw each element
+    for i, el in enumerate(flat_elements):
+        bbox = el.get('bounding_box', [])
+        ref = el.get('ref', f'v{i+1}')
+
+        if len(bbox) != 4:
+            continue
+
+        y_min, x_min, y_max, x_max = bbox
+        color = OKABE_ITO_COLORS[i % len(OKABE_ITO_COLORS)]
+
+        # Draw semi-transparent fill on overlay
+        fill_color = (*color, 40)  # ~15% opacity
+        draw_overlay.rectangle([x_min, y_min, x_max, y_max], fill=fill_color)
+
+        # Draw solid border (2px width)
+        draw.rectangle([x_min, y_min, x_max, y_max], outline=color, width=2)
+
+        # Draw ref label background and text
+        label = ref
+        # Get text bounding box
+        text_bbox = draw.textbbox((0, 0), label, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+
+        # Position label at top-left of bounding box
+        label_x = x_min + 2
+        label_y = y_min + 2
+
+        # Ensure label stays within image bounds
+        if label_x + text_width + 4 > img.width:
+            label_x = img.width - text_width - 4
+        if label_y + text_height + 4 > img.height:
+            label_y = img.height - text_height - 4
+
+        # Draw label background
+        padding = 2
+        draw.rectangle(
+            [label_x - padding, label_y - padding,
+             label_x + text_width + padding, label_y + text_height + padding],
+            fill=color
+        )
+
+        # Draw label text (white for dark colors, black for light)
+        # Simple luminance check
+        luminance = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+        text_color = (0, 0, 0) if luminance > 128 else (255, 255, 255)
+        draw.text((label_x, label_y), label, fill=text_color, font=font)
+
+    # Composite overlay onto image
+    img = Image.alpha_composite(img, overlay)
+
+    # Convert back to RGB for saving as PNG (or keep RGBA)
+    img.save(output_path, 'PNG')
+
+    return output_path
+
+
 def validate_element(el, width, height, errors, path="root"):
     """Validate and clamp bounding boxes."""
     bbox = el.get('bounding_box', [])
@@ -177,6 +307,8 @@ def main():
     parser.add_argument("image_path", help="Path to screenshot image")
     parser.add_argument("--hint", help="Optional content hint (e.g., 'This is a bar chart')")
     parser.add_argument("--model", default=MODEL, help=f"Gemini model to use (default: {MODEL})")
+    parser.add_argument("--annotate", action="store_true",
+                       help="Generate annotated image with bounding box overlays")
     args = parser.parse_args()
 
     # Check for API key
@@ -262,16 +394,27 @@ Focus on elements useful for automation and data extraction."""
         for i, el in enumerate(tree.get('elements', [])):
             validate_element(el, width, height, errors, f"elements[{i}]")
 
+        # Assign refs to elements
+        elements = tree.get('elements', [])
+        assign_refs(elements)
+
         # Build result
         result = {
             "width": width,
             "height": height,
             "model": args.model,
-            "elements": tree.get('elements', []),
+            "elements": elements,
         }
 
         if errors:
             result["validation_warnings"] = errors
+
+        # Generate annotated image if requested
+        if args.annotate:
+            input_path = Path(args.image_path)
+            annotated_path = input_path.parent / f"{input_path.stem}_annotated.png"
+            draw_annotations(args.image_path, elements, str(annotated_path))
+            result["annotated_image"] = str(annotated_path)
 
         print(json.dumps(result))
         sys.exit(0)
