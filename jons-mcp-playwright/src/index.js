@@ -97,10 +97,17 @@ export async function createConnection(config = {}, contextGetter) {
     '--hide-crash-restore-bubble',
   ];
 
-  // Enable all capabilities by default (vision for coordinate tools, pdf for PDF handling)
-  // This exposes browser_mouse_click_xy, browser_mouse_move_xy, browser_mouse_drag_xy
+  // Handle capabilities from CLI (--playwright-caps=vision or --playwright-caps=vision,pdf)
+  // CLI passes 'caps' as a comma-separated string, convert to 'capabilities' array
+  if (playwrightConfig.caps) {
+    playwrightConfig.capabilities = playwrightConfig.caps.split(',').map(c => c.trim());
+    delete playwrightConfig.caps;
+  }
+
+  // Enable pdf capability by default for PDF handling
+  // Vision capability (browser_mouse_*_xy tools) is opt-in via --playwright-caps=vision
   if (!playwrightConfig.capabilities) {
-    playwrightConfig.capabilities = ['vision', 'pdf'];
+    playwrightConfig.capabilities = ['pdf'];
   }
 
   // Create the inner Playwright MCP server

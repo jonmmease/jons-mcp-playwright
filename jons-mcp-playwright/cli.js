@@ -74,6 +74,7 @@ Options:
   --playwright-*             Options passed through to Playwright MCP
                              Examples: --playwright-browser=firefox
                                        --playwright-headless
+                                       --playwright-caps=vision (enable XY coordinate tools)
   --no-show-actions          Disable visual feedback (cursor, click ripples, keystroke HUD)
   --ngrok                    Serve downloads via ngrok tunnel (requires NGROK_AUTHTOKEN)
 

@@ -273,11 +273,22 @@ test.describe('Developer Tools Filtering', () => {
     expect(toolNames).toContain('browser_get_bounds');
   });
 
-  test('includes vision tools by default', async ({ client }) => {
+  test('hides vision tools by default', async ({ client }) => {
     const tools = await client.listTools();
     const toolNames = tools.tools.map((t) => t.name);
 
-    // Vision tools should be available without --caps=vision flag
+    // Vision tools (XY coordinate tools) should NOT be available by default
+    expect(toolNames).not.toContain('browser_mouse_click_xy');
+    expect(toolNames).not.toContain('browser_mouse_move_xy');
+    expect(toolNames).not.toContain('browser_mouse_drag_xy');
+  });
+
+  test('includes vision tools when --playwright-caps=vision is passed', async ({ startClient }) => {
+    const { client } = await startClient({ args: ['--playwright-caps=vision'] });
+    const tools = await client.listTools();
+    const toolNames = tools.tools.map((t) => t.name);
+
+    // Vision tools should be available with --playwright-caps=vision
     expect(toolNames).toContain('browser_mouse_click_xy');
     expect(toolNames).toContain('browser_mouse_move_xy');
     expect(toolNames).toContain('browser_mouse_drag_xy');
