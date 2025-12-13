@@ -184,10 +184,19 @@ test.describe('browser_get_bounds', () => {
 
 test.describe('browser_get_image', () => {
   test('extracts image info', async ({ client, server }) => {
+    // Serve a minimal 1x1 red PNG image
+    const redPixelPng = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==',
+      'base64'
+    );
+    server.setRoute('/test-image.png', (req, res) => {
+      res.setHeader('Content-Type', 'image/png');
+      res.end(redPixelPng);
+    });
     server.setRoute('/image', (req, res) => {
       res.end(`
         <html><body>
-          <img src="https://example.com/image.jpg" alt="Example Image" width="200" height="100">
+          <img src="${server.PREFIX}/test-image.png" alt="Example Image" width="200" height="100">
         </body></html>
       `);
     });
@@ -208,10 +217,15 @@ test.describe('browser_get_image', () => {
 
     expect(response.isError).toBeFalsy();
     const text = response.content[0].text;
-    expect(text).toContain('URL:');
-    expect(text).toContain('example.com/image.jpg');
+    // Should include download URL
+    expect(text).toContain('Download URL:');
+    expect(text).toContain('http://localhost:');
+    // Should include alt text
     expect(text).toContain('Alt text:');
     expect(text).toContain('Example Image');
+    // Should include original URL
+    expect(text).toContain('Original URL:');
+    expect(text).toContain('test-image.png');
   });
 
   test('returns error for non-image element', async ({ client, server }) => {

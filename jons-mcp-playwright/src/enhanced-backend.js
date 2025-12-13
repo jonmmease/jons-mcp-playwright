@@ -1303,11 +1303,12 @@ Example:
 
   /**
    * Handle browser_get_image tool
-   * @param {Object} args - { ref, saveToFile? }
-   * @returns {Promise<Object>} Image data or file path
+   * Downloads the image and serves it through localhost server
+   * @param {Object} args - { ref }
+   * @returns {Promise<Object>} Image download URL and metadata
    */
   async _handleGetImage(args) {
-    const { ref, saveToFile: shouldSaveToFile } = args;
+    const { ref } = args;
 
     if (!ref) {
       return {
@@ -1316,11 +1317,11 @@ Example:
       };
     }
 
-    // Use browser_evaluate to get image info
+    // Use browser_evaluate to get image info and fetch the image data as base64
     const evalResult = await this._inner.callTool('browser_evaluate', {
       ref,
       element: 'image element',
-      function: `(element) => {
+      function: `async (element) => {
         if (element.tagName !== 'IMG') {
           return { error: 'Element is not an <img> tag, it is: ' + element.tagName };
         }
@@ -1337,12 +1338,45 @@ Example:
           }
           if (bestSource[0]) url = bestSource[0];
         }
-        return {
-          url,
-          naturalWidth: element.naturalWidth,
-          naturalHeight: element.naturalHeight,
-          alt: element.alt || ''
-        };
+
+        // Fetch the image and convert to base64
+        try {
+          const response = await fetch(url);
+          if (!response.ok) {
+            return {
+              error: 'Failed to fetch image: ' + response.status + ' ' + response.statusText,
+              url,
+              naturalWidth: element.naturalWidth,
+              naturalHeight: element.naturalHeight,
+              alt: element.alt || ''
+            };
+          }
+          const contentType = response.headers.get('content-type') || 'image/png';
+          const blob = await response.blob();
+          const arrayBuffer = await blob.arrayBuffer();
+          const bytes = new Uint8Array(arrayBuffer);
+          let binary = '';
+          for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+          }
+          const base64 = btoa(binary);
+          return {
+            url,
+            naturalWidth: element.naturalWidth,
+            naturalHeight: element.naturalHeight,
+            alt: element.alt || '',
+            base64,
+            contentType
+          };
+        } catch (e) {
+          return {
+            error: 'Failed to fetch image: ' + e.message,
+            url,
+            naturalWidth: element.naturalWidth,
+            naturalHeight: element.naturalHeight,
+            alt: element.alt || ''
+          };
+        }
       }`,
     });
 
@@ -1365,40 +1399,81 @@ Example:
       };
     }
 
-    if (imgInfo.error) {
+    if (imgInfo.error && !imgInfo.base64) {
       return {
         content: [{ type: 'text', text: imgInfo.error }],
         isError: true,
       };
     }
 
-    // For now, return image URL and metadata without fetching the actual image data
-    // (fetching binary data through MCP is complex and would require additional handling)
-    const response = `Image found:
-- URL: ${imgInfo.url}
-- Dimensions: ${imgInfo.naturalWidth}x${imgInfo.naturalHeight}
-- Alt text: ${imgInfo.alt || '(none)'}
-
-To download this image, use browser_navigate to go to the URL or use the URL in your response.`;
-
-    if (shouldSaveToFile) {
+    // If we have base64 data, save to temp file and serve via localhost
+    if (imgInfo.base64) {
       try {
-        const { path, bytes } = await saveToFile(response, {
-          type: 'image',
-          ref,
-          extension: 'txt',
-          tempDir: this.config.tempDir,
-        });
+        // Determine file extension from content type
+        const contentType = imgInfo.contentType || 'image/png';
+        const extMap = {
+          'image/png': 'png',
+          'image/jpeg': 'jpg',
+          'image/gif': 'gif',
+          'image/webp': 'webp',
+          'image/svg+xml': 'svg',
+        };
+        const ext = extMap[contentType] || 'png';
+
+        // Generate filename from URL or timestamp
+        let filename;
+        try {
+          const urlPath = new URL(imgInfo.url).pathname;
+          const urlFilename = path.basename(urlPath);
+          // Use URL filename if it has an extension, otherwise generate one
+          if (urlFilename && urlFilename.includes('.')) {
+            filename = urlFilename;
+          } else {
+            filename = `image-${Date.now()}.${ext}`;
+          }
+        } catch {
+          filename = `image-${Date.now()}.${ext}`;
+        }
+
+        // Decode base64 and save to temp file
+        const imageBuffer = Buffer.from(imgInfo.base64, 'base64');
+        const tempDir = this.config.tempDir || require('os').tmpdir();
+        const savedFilePath = path.join(tempDir, `mcp-image-${Date.now()}-${filename}`);
+        fs.writeFileSync(savedFilePath, imageBuffer);
+
+        // Register with localhost server and get download URL
+        const server = await this._ensureLocalhostServer();
+        const { publicUrl } = server.registerDownload(savedFilePath, filename);
+
+        const response = `Image extracted (${imgInfo.naturalWidth} × ${imgInfo.naturalHeight} pixels)
+- Alt text: ${imgInfo.alt || '(none)'}
+- Original URL: ${imgInfo.url}
+
+Download URL: ${publicUrl}
+
+To download:
+\`\`\`bash
+curl -o "${filename}" "${publicUrl}"
+\`\`\``;
+
         return {
-          content: [{ type: 'text', text: `Image info saved to: ${path} (${bytes} bytes)` }],
+          content: [{ type: 'text', text: response }],
         };
       } catch (error) {
         return {
-          content: [{ type: 'text', text: `Failed to save: ${error.message}` }],
+          content: [{ type: 'text', text: `Failed to process image: ${error.message}` }],
           isError: true,
         };
       }
     }
+
+    // Fallback: return just metadata if we couldn't fetch the image
+    const response = `Image found but could not be downloaded:
+- URL: ${imgInfo.url}
+- Dimensions: ${imgInfo.naturalWidth}x${imgInfo.naturalHeight}
+- Alt text: ${imgInfo.alt || '(none)'}
+
+To download this image manually, use browser_navigate to go to the URL.`;
 
     return {
       content: [{ type: 'text', text: response }],

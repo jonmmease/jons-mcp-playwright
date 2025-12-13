@@ -1,27 +1,18 @@
 /**
  * browser_get_image tool
  *
- * Retrieves the original source image from an <img> element.
+ * Downloads an image from an <img> element and serves it via localhost URL.
  */
-
-// TODO: Implement in browser-get-image task
-export async function getImage(page, ref, options = {}) {
-  throw new Error('browser_get_image not yet implemented');
-}
 
 export const schema = {
   name: 'browser_get_image',
-  description: 'Get the original source image from an img element',
+  description: 'Download an image from an img element and get a localhost URL for it. Returns the image dimensions, alt text, and a download URL.',
   inputSchema: {
     type: 'object',
     properties: {
       ref: {
         type: 'string',
         description: 'Element ref pointing to an img element',
-      },
-      saveToFile: {
-        type: 'boolean',
-        description: 'Save to temp file and return path instead of data (default: false)',
       },
     },
     required: ['ref'],
