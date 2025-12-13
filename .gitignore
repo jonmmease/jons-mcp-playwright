@@ -8,3 +8,5 @@ playwright-report/
 .DS_Store
 .env
 sessions/
+__pycache__/
+jons-mcp-playwright/prototypes/

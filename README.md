@@ -34,11 +34,13 @@ This fork wraps the standard `@playwright/mcp` logic and adds filtering and new 
 **Vision Capability** (`--playwright-caps=vision`):
 - Enables coordinate-based tools (`browser_mouse_click_xy`, `browser_mouse_move_xy`, etc.)
 - `browser_locate_in_screenshot` - Uses Gemini AI to find UI elements by description and returns pixel coordinates
+- `browser_screenshot_snapshot` - Creates an accessibility tree from a screenshot using Gemini AI vision. Useful for canvas-rendered UIs, charts, and other visual elements that don't have DOM structure. Returns "vision refs" (v1, v2, ...) that can be used with `browser_click`, `browser_hover`, `browser_get_bounds`, and `browser_get_text`
 - Requirements:
   - `GEMINI_API_KEY` - Google Gemini API key ([get one here](https://aistudio.google.com/apikey))
   - `uv` - Python package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 - Optional:
   - `UV_PATH` - Custom path to uv executable (default: `uv`)
+  - `SCREENSHOT_REF_TTL` - Vision ref cache TTL in milliseconds (default: 30000)
 
 **CLI Options** (for `jons-mcp-playwright` subproject):
 - `--include-developer-tools` - Show hidden tools (tracing, locator generation, verification)

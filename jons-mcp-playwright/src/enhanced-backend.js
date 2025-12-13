@@ -18,7 +18,11 @@ import { schema as getBoundsSchema } from './tools/get-bounds.js';
 import { highlightSchema, clearHighlightsSchema } from './tools/highlight.js';
 import { schema as requestUploadSchema } from './tools/request-upload.js';
 import { schema as locateInScreenshotSchema } from './tools/locate-in-screenshot.js';
+import { schema as screenshotSnapshotSchema } from './tools/screenshot-snapshot.js';
 import { runPythonScript } from './utils/run-python.js';
+import { VisionRefCache, isVisionRef } from './vision-ref-cache.js';
+import { assignRefs } from './schema/screenshot-snapshot-schema.js';
+import { elementsToYaml, formatMetadata } from './utils/vision-yaml.js';
 
 // ESM-safe __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -136,6 +140,7 @@ export class EnhancedBackend {
     this.config = config;
     this._inner = innerBackend;
     this._snapshotCache = new SnapshotCache(5000); // 5 second TTL
+    this._visionRefCache = new VisionRefCache(); // Vision ref cache with TTL from env
     this._activeHighlights = []; // Track highlighted elements for cleanup
     this._highlightStylesInjected = false; // Track if CSS has been injected
     this._localhostServer = null; // Lazy-initialized localhost server for serving downloads
@@ -279,8 +284,8 @@ export class EnhancedBackend {
       });
     }
 
-    // Add browser_locate_in_screenshot only when vision capability is enabled
-    // This tool requires vision capability because it produces coordinates for use with browser_mouse_*_xy
+    // Add vision tools only when vision capability is enabled
+    // These tools require vision capability because they use Gemini API
     if (this._hasVisionCapability()) {
       tools.push({
         name: locateInScreenshotSchema.name,
@@ -288,6 +293,17 @@ export class EnhancedBackend {
         inputSchema: locateInScreenshotSchema.inputSchema,
         annotations: {
           title: 'locate in screenshot',
+          readOnlyHint: true,
+          openWorldHint: true,
+        },
+      });
+
+      tools.push({
+        name: screenshotSnapshotSchema.name,
+        description: screenshotSnapshotSchema.description,
+        inputSchema: screenshotSnapshotSchema.inputSchema,
+        annotations: {
+          title: 'screenshot snapshot',
           readOnlyHint: true,
           openWorldHint: true,
         },
@@ -301,6 +317,30 @@ export class EnhancedBackend {
         if (tool && tool.description) {
           tool.description = tool.description + coordinateNote;
         }
+      }
+
+      // Update ref-based tools to mention v-ref support from browser_screenshot_snapshot
+      const vrefNote = ' Also accepts v-refs (v1, v2, ...) from browser_screenshot_snapshot for clicking vision-detected elements.';
+      const vrefTools = ['browser_click', 'browser_hover', 'browser_get_bounds', 'browser_get_text'];
+      for (const toolName of vrefTools) {
+        const tool = tools.find(t => t.name === toolName);
+        if (tool && tool.description) {
+          tool.description = tool.description + vrefNote;
+        }
+      }
+
+      // Update browser_take_screenshot to mention v-ref cropping
+      const screenshotTool = tools.find(t => t.name === 'browser_take_screenshot');
+      if (screenshotTool && screenshotTool.description) {
+        screenshotTool.description = screenshotTool.description +
+          ' Pass a v-ref (from browser_screenshot_snapshot) to crop to that element.';
+      }
+
+      // Update browser_drag to mention v-ref support
+      const dragTool = tools.find(t => t.name === 'browser_drag');
+      if (dragTool && dragTool.description) {
+        dragTool.description = dragTool.description +
+          ' startRef and endRef can be v-refs (v1, v2, ...) from browser_screenshot_snapshot.';
       }
     }
 
@@ -743,6 +783,34 @@ Example:
       result = await this._handleLocateInScreenshot(args);
       return result;
     }
+    if (name === 'browser_screenshot_snapshot') {
+      // Check vision capability before handling
+      if (!this._hasVisionCapability()) {
+        return {
+          content: [{
+            type: 'text',
+            text: `browser_screenshot_snapshot requires vision capability.
+
+Enable it with: --playwright-caps=vision
+
+Example:
+  npx jons-mcp-playwright --playwright-caps=vision`,
+          }],
+          isError: true,
+        };
+      }
+      result = await this._handleScreenshotSnapshot(args);
+      return result;
+    }
+
+    // Check for vision refs (v1, v2, etc.) in tool args and route to vision ref handlers
+    if (this._hasVisionRef(args)) {
+      const visionResult = await this._handleVisionRefTool(name, args, progress);
+      if (visionResult !== null) {
+        return visionResult;
+      }
+      // Fall through to normal handling if tool doesn't support vision refs
+    }
 
     // Auto-clear highlights before browser actions that indicate user is moving on
     if (HIGHLIGHT_CLEARING_ACTIONS.has(name) && this._activeHighlights.length > 0) {
@@ -1182,6 +1250,13 @@ Example:
    */
   async _handleSnapshotTool(name, args, progress) {
     const { maxDepth, listLimit, fileTokens, ...toolArgs } = args;
+
+    // Clear vision ref cache on navigation (invalidates v-refs)
+    if (name === 'browser_navigate' || name === 'browser_navigate_back') {
+      const page = await this._getActivePage();
+      const pageId = this._getPageId(page);
+      this._visionRefCache.clearPage(pageId);
+    }
 
     // For browser_file_upload, resolve fileTokens to local paths
     if (name === 'browser_file_upload' && fileTokens && fileTokens.length > 0) {
@@ -2471,6 +2546,550 @@ Try a more specific description or ensure the element is visible in the screensh
     };
   }
 
+  // ============================================================
+  // Vision Ref Handling (browser_screenshot_snapshot and v-refs)
+  // ============================================================
+
+  /**
+   * Handle browser_screenshot_snapshot tool
+   * Takes screenshot, sends to Gemini for analysis, returns accessibility tree with v-refs
+   *
+   * @param {Object} args - { description?: string }
+   * @returns {Promise<Object>} MCP response with YAML tree or error
+   */
+  async _handleScreenshotSnapshot(args) {
+    const { description } = args;
+
+    // Check for GEMINI_API_KEY
+    if (!process.env.GEMINI_API_KEY) {
+      return {
+        content: [{
+          type: 'text',
+          text: `GEMINI_API_KEY environment variable is required for browser_screenshot_snapshot.
+
+Get an API key at: https://aistudio.google.com/apikey
+
+Then set it:
+  export GEMINI_API_KEY=your-api-key-here`,
+        }],
+        isError: true,
+      };
+    }
+
+    try {
+      // Take screenshot using existing mechanism
+      const screenshotResult = await this._inner.callTool('browser_take_screenshot', {});
+
+      // Extract screenshot path from result
+      let screenshotPath = null;
+
+      // Check if we have a downloadUrl or need to save the image
+      if (screenshotResult.content) {
+        for (const item of screenshotResult.content) {
+          if (item.type === 'image' && item.data) {
+            // Save base64 image to temp file
+            const tempPath = path.join(process.env.TMPDIR || '/tmp', `screenshot_${Date.now()}.png`);
+            fs.writeFileSync(tempPath, Buffer.from(item.data, 'base64'));
+            screenshotPath = tempPath;
+            break;
+          }
+          // Check for URL pattern in text
+          if (item.type === 'text' && item.text.includes('localhost')) {
+            const urlMatch = item.text.match(/http:\/\/localhost:\d+\/downloads\/[^\s]+/);
+            if (urlMatch) {
+              const { localPath } = this._resolveScreenshotUrl(urlMatch[0]);
+              screenshotPath = localPath;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!screenshotPath) {
+        return {
+          content: [{
+            type: 'text',
+            text: 'Failed to capture screenshot for analysis',
+          }],
+          isError: true,
+        };
+      }
+
+      // Get page info for cache scoping and deviceScaleFactor
+      const page = await this._getActivePage();
+      const pageId = this._getPageId(page);
+      const deviceScaleFactor = await page.evaluate(() => window.devicePixelRatio) || 1;
+
+      // Clear existing vision refs for this page
+      this._visionRefCache.clearPage(pageId);
+
+      // Path to Python script
+      const scriptPath = path.join(__dirname, 'screenshot_snapshot.py');
+
+      // Build args for Python script
+      const scriptArgs = [screenshotPath];
+      if (description) {
+        scriptArgs.push(`--hint=${description}`);
+      }
+
+      // Run Python script via uv
+      const result = await runPythonScript(scriptPath, scriptArgs);
+
+      // Check for errors
+      if (result.error) {
+        return this._formatVisionError(result);
+      }
+
+      // Handle empty tree
+      if (!result.elements || result.elements.length === 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: 'No visual elements detected in screenshot. The image may be blank or contain unsupported content.',
+          }],
+        };
+      }
+
+      // Assign v-refs post-hoc
+      assignRefs(result.elements);
+
+      // Serve screenshot via localhost (for potential cropping later)
+      const server = await this._ensureLocalhostServer();
+      const filename = path.basename(screenshotPath);
+      const { publicUrl } = server.registerDownload(screenshotPath, filename);
+
+      // Cache all refs with coordinates
+      this._visionRefCache.cacheElements(
+        result.elements,
+        pageId,
+        publicUrl,
+        deviceScaleFactor
+      );
+
+      // Convert to YAML format
+      const yaml = elementsToYaml(result.elements);
+
+      // Build metadata header
+      const metadata = formatMetadata({
+        width: result.width,
+        height: result.height,
+        deviceScaleFactor,
+        ttlMs: this._visionRefCache.ttl,
+        warnings: result.validation_warnings,
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: `${metadata}\n\n${yaml}`,
+        }],
+      };
+
+    } catch (error) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Screenshot snapshot failed: ${error.message}`,
+        }],
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * Format vision API error for user display
+   * @param {Object} result - Error result from Python script
+   * @returns {Object} MCP error response
+   */
+  _formatVisionError(result) {
+    const errorMessages = {
+      auth_missing: 'GEMINI_API_KEY environment variable not set',
+      auth_error: 'Invalid or expired Gemini API key',
+      quota_exceeded: 'Gemini API quota exceeded. Try again later.',
+      rate_limited: 'Gemini API rate limit hit. Wait a moment and retry.',
+      schema_error: 'Gemini returned invalid response format',
+      timeout: 'Gemini API request timed out',
+      file_not_found: 'Screenshot file not found',
+    };
+
+    const message = errorMessages[result.error_code] || result.error || 'Unknown vision error';
+
+    return {
+      content: [{
+        type: 'text',
+        text: `Vision analysis failed: ${message}`,
+      }],
+      isError: true,
+    };
+  }
+
+  /**
+   * Check if args contain any vision refs (v1, v2, etc.)
+   * @param {Object} args - Tool arguments
+   * @returns {boolean}
+   */
+  _hasVisionRef(args) {
+    if (!args) return false;
+    // Check common ref argument names
+    return isVisionRef(args.ref) ||
+           isVisionRef(args.startRef) ||
+           isVisionRef(args.endRef) ||
+           isVisionRef(args.element);
+  }
+
+  /**
+   * Handle tools with vision refs
+   * Routes to appropriate handler based on tool name
+   *
+   * @param {string} name - Tool name
+   * @param {Object} args - Tool arguments with v-ref
+   * @param {Function} progress - Progress callback
+   * @returns {Promise<Object|null>} MCP response or null if tool doesn't support v-refs
+   */
+  async _handleVisionRefTool(name, args, progress) {
+    // Whitelist of tools that support vision refs
+    const V_REF_TOOLS = new Set([
+      'browser_click',
+      'browser_hover',
+      'browser_drag',
+      'browser_get_bounds',
+      'browser_take_screenshot',
+      'browser_get_text',
+    ]);
+
+    if (!V_REF_TOOLS.has(name)) {
+      return null; // Tool doesn't support v-refs
+    }
+
+    // Get page for cache lookup
+    const page = await this._getActivePage();
+    const pageId = this._getPageId(page);
+
+    // Route to specific handlers
+    switch (name) {
+      case 'browser_click':
+        return this._handleVisionRefClick(pageId, args, progress);
+
+      case 'browser_hover':
+        return this._handleVisionRefHover(pageId, args, progress);
+
+      case 'browser_drag':
+        return this._handleVisionRefDrag(pageId, args, progress);
+
+      case 'browser_get_bounds':
+        return this._handleVisionRefGetBounds(pageId, args);
+
+      case 'browser_take_screenshot':
+        return this._handleVisionRefScreenshot(pageId, args);
+
+      case 'browser_get_text':
+        return this._handleVisionRefGetText(pageId, args);
+
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Handle browser_click with vision ref
+   * @param {string} pageId - Page ID for cache lookup
+   * @param {Object} args - { ref: string }
+   * @returns {Promise<Object>} MCP response
+   */
+  async _handleVisionRefClick(pageId, args, progress) {
+    const { ref } = args;
+
+    // Get full cache entry for element description
+    const entry = this._visionRefCache.get(pageId, ref);
+    if (!entry) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Vision ref "${ref}" not found or expired. Run browser_screenshot_snapshot to get fresh refs.`,
+        }],
+        isError: true,
+      };
+    }
+
+    const coords = { x: entry.bounds.centerX, y: entry.bounds.centerY };
+
+    // Show visual feedback if enabled
+    if (process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+      await this._showVisualFeedback('moveCursor', coords);
+      await new Promise(r => setTimeout(r, 300));
+      this._showVisualFeedback('showClick', coords).catch(() => {});
+    }
+
+    // Build element description for Playwright MCP permission
+    const elementDesc = `${entry.role} "${entry.name}"`;
+
+    // Click at coordinates
+    const result = await this._handleSnapshotTool('browser_mouse_click_xy', {
+      element: elementDesc,
+      x: coords.x,
+      y: coords.y,
+    }, progress);
+
+    return this._postProcessResult(result);
+  }
+
+  /**
+   * Handle browser_hover with vision ref
+   * @param {string} pageId - Page ID for cache lookup
+   * @param {Object} args - { ref: string }
+   * @returns {Promise<Object>} MCP response
+   */
+  async _handleVisionRefHover(pageId, args, progress) {
+    const { ref } = args;
+
+    // Get full cache entry for element description
+    const entry = this._visionRefCache.get(pageId, ref);
+    if (!entry) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Vision ref "${ref}" not found or expired. Run browser_screenshot_snapshot to get fresh refs.`,
+        }],
+        isError: true,
+      };
+    }
+
+    const coords = { x: entry.bounds.centerX, y: entry.bounds.centerY };
+
+    // Show visual feedback if enabled
+    if (process.env.JONS_MCP_SHOW_ACTIONS !== 'off') {
+      this._showVisualFeedback('moveCursor', coords).catch(() => {});
+    }
+
+    // Build element description for Playwright MCP permission
+    const elementDesc = `${entry.role} "${entry.name}"`;
+
+    // Move to coordinates
+    const result = await this._inner.callTool('browser_mouse_move_xy', {
+      element: elementDesc,
+      x: coords.x,
+      y: coords.y,
+    });
+
+    return this._postProcessResult(result);
+  }
+
+  /**
+   * Handle browser_drag with vision refs
+   * @param {string} pageId - Page ID for cache lookup
+   * @param {Object} args - { startRef: string, endRef: string }
+   * @returns {Promise<Object>} MCP response
+   */
+  async _handleVisionRefDrag(pageId, args, progress) {
+    const { startRef, endRef } = args;
+
+    // Get start entry
+    const startEntry = startRef && isVisionRef(startRef)
+      ? this._visionRefCache.get(pageId, startRef)
+      : null;
+
+    // Get end entry
+    const endEntry = endRef && isVisionRef(endRef)
+      ? this._visionRefCache.get(pageId, endRef)
+      : null;
+
+    // Validate we have what we need
+    if (startRef && isVisionRef(startRef) && !startEntry) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Vision ref "${startRef}" not found or expired.`,
+        }],
+        isError: true,
+      };
+    }
+
+    if (endRef && isVisionRef(endRef) && !endEntry) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Vision ref "${endRef}" not found or expired.`,
+        }],
+        isError: true,
+      };
+    }
+
+    // Build element description from start and/or end refs
+    const descriptions = [];
+    if (startEntry) {
+      descriptions.push(`from ${startEntry.role} "${startEntry.name}"`);
+    }
+    if (endEntry) {
+      descriptions.push(`to ${endEntry.role} "${endEntry.name}"`);
+    }
+    const elementDesc = descriptions.join(' ') || 'drag operation';
+
+    // Build drag args with resolved coordinates
+    const dragArgs = { element: elementDesc };
+    if (startEntry) {
+      dragArgs.startX = startEntry.bounds.centerX;
+      dragArgs.startY = startEntry.bounds.centerY;
+    } else if (args.startX !== undefined && args.startY !== undefined) {
+      dragArgs.startX = args.startX;
+      dragArgs.startY = args.startY;
+    }
+    if (endEntry) {
+      dragArgs.endX = endEntry.bounds.centerX;
+      dragArgs.endY = endEntry.bounds.centerY;
+    } else if (args.endX !== undefined && args.endY !== undefined) {
+      dragArgs.endX = args.endX;
+      dragArgs.endY = args.endY;
+    }
+
+    // Show visual feedback
+    if (process.env.JONS_MCP_SHOW_ACTIONS !== 'off' && startEntry) {
+      const startCoords = { x: startEntry.bounds.centerX, y: startEntry.bounds.centerY };
+      await this._showVisualFeedback('moveCursor', startCoords);
+      await new Promise(r => setTimeout(r, 500));
+      if (endEntry) {
+        const endCoords = { x: endEntry.bounds.centerX, y: endEntry.bounds.centerY };
+        this._showVisualFeedback('moveCursor', endCoords).catch(() => {});
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+
+    // Execute drag
+    const result = await this._handleSnapshotTool('browser_mouse_drag_xy', dragArgs, progress);
+    return this._postProcessResult(result);
+  }
+
+  /**
+   * Handle browser_get_bounds with vision ref
+   * @param {string} pageId - Page ID for cache lookup
+   * @param {Object} args - { ref: string }
+   * @returns {Promise<Object>} MCP response
+   */
+  async _handleVisionRefGetBounds(pageId, args) {
+    const { ref } = args;
+
+    const bounds = this._visionRefCache.getBounds(pageId, ref);
+    if (!bounds) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Vision ref "${ref}" not found or expired. Run browser_screenshot_snapshot to get fresh refs.`,
+        }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: `Element bounds (CSS pixels): x=${bounds.x}, y=${bounds.y}, width=${bounds.width}, height=${bounds.height}`,
+      }],
+    };
+  }
+
+  /**
+   * Handle browser_take_screenshot with vision ref (crop to element)
+   * @param {string} pageId - Page ID for cache lookup
+   * @param {Object} args - { ref: string }
+   * @returns {Promise<Object>} MCP response
+   */
+  async _handleVisionRefScreenshot(pageId, args) {
+    const { ref, ...otherArgs } = args;
+
+    const bounds = this._visionRefCache.getBounds(pageId, ref);
+    if (!bounds) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Vision ref "${ref}" not found or expired. Run browser_screenshot_snapshot to get fresh refs.`,
+        }],
+        isError: true,
+      };
+    }
+
+    // Take screenshot with clip region
+    // Note: Playwright clip uses CSS pixels
+    return this._handleScreenshot({
+      ...otherArgs,
+      clip: {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+      },
+    });
+  }
+
+  /**
+   * Handle browser_get_text with vision ref
+   * Returns the cached element name (which contains verbatim text for text elements)
+   * @param {string} pageId - Page ID for cache lookup
+   * @param {Object} args - { ref: string }
+   * @returns {Promise<Object>} MCP response
+   */
+  async _handleVisionRefGetText(pageId, args) {
+    const { ref } = args;
+
+    const name = this._visionRefCache.getName(pageId, ref);
+    if (name === null) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Vision ref "${ref}" not found or expired. Run browser_screenshot_snapshot to get fresh refs.`,
+        }],
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: name,
+      }],
+    };
+  }
+
+  /**
+   * Get the active page from the inner backend
+   * @returns {Promise<Object>} Playwright Page object
+   */
+  async _getActivePage() {
+    // The inner backend should have a way to get the active page
+    // pages() is a function that returns an array of pages
+    if (this._inner._context?.pages) {
+      const pages = this._inner._context.pages();
+      if (pages.length > 0) {
+        return pages[pages.length - 1];
+      }
+    }
+    // Try to get page via browser_tabs
+    const tabsResult = await this._inner.callTool('browser_tabs', {});
+    if (tabsResult.content?.[0]?.text) {
+      // Parse active tab info - actual implementation depends on backend
+      // For now, return a mock page that can evaluate devicePixelRatio
+    }
+    // Fallback: return a proxy that returns devicePixelRatio 1
+    return {
+      evaluate: async (fn) => {
+        if (fn.toString().includes('devicePixelRatio')) return 1;
+        return null;
+      },
+    };
+  }
+
+  /**
+   * Get unique ID for a page (for cache scoping)
+   * @param {Object} page - Playwright Page object
+   * @returns {string} Unique page identifier
+   */
+  _getPageId(page) {
+    // Use page URL or generate a unique ID
+    try {
+      return page.url?.() || 'default';
+    } catch {
+      return 'default';
+    }
+  }
+
   /**
    * Called when the server is closed
    */
@@ -2480,6 +3099,9 @@ Try a more specific description or ensure the element is visible in the screensh
       await this._localhostServer.stop();
       this._localhostServer = null;
     }
+
+    // Clear vision ref cache
+    this._visionRefCache.clearAll();
 
     if (this._inner.serverClosed) {
       this._inner.serverClosed();
