@@ -293,6 +293,19 @@ test.describe('Developer Tools Filtering', () => {
     expect(toolNames).toContain('browser_mouse_move_xy');
     expect(toolNames).toContain('browser_mouse_drag_xy');
   });
+
+  test('coordinate tools include locate_in_screenshot guidance when vision enabled', async ({ startClient }) => {
+    const { client } = await startClient({ args: ['--playwright-caps=vision'] });
+    const tools = await client.listTools();
+
+    const coordinateTools = ['browser_mouse_click_xy', 'browser_mouse_move_xy', 'browser_mouse_drag_xy'];
+    for (const toolName of coordinateTools) {
+      const tool = tools.tools.find((t) => t.name === toolName);
+      expect(tool).toBeDefined();
+      expect(tool?.description).toContain('browser_locate_in_screenshot');
+      expect(tool?.description).toContain('browser_take_screenshot');
+    }
+  });
 });
 
 test.describe('saveToFile', () => {

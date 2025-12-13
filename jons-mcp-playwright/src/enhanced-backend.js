@@ -292,6 +292,16 @@ export class EnhancedBackend {
           openWorldHint: true,
         },
       });
+
+      // Update coordinate-based tool descriptions to reference browser_locate_in_screenshot
+      const coordinateNote = ' Use browser_take_screenshot followed by browser_locate_in_screenshot to get coordinates.';
+      const coordinateTools = ['browser_mouse_click_xy', 'browser_mouse_move_xy', 'browser_mouse_drag_xy'];
+      for (const toolName of coordinateTools) {
+        const tool = tools.find(t => t.name === toolName);
+        if (tool && tool.description) {
+          tool.description = tool.description + coordinateNote;
+        }
+      }
     }
 
     return tools;
