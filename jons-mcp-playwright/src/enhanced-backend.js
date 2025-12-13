@@ -109,6 +109,54 @@ const HIGHLIGHT_CLEARING_ACTIONS = new Set([
   'browser_close',
 ]);
 
+// Roles that are good candidates for browser_screenshot_snapshot (vision analysis)
+const VISION_CANDIDATE_ROLES = new Set([
+  'img',              // <img> elements - charts, diagrams, infographics
+  'graphics-document', // <canvas> elements and SVG with this role
+  'graphics-object',  // SVG graphics
+]);
+
+/**
+ * Find elements in a parsed snapshot tree that are candidates for vision analysis
+ * @param {Object} node - Parsed snapshot node
+ * @param {Array} candidates - Accumulator for found candidates
+ * @returns {Array} Array of {role, name, ref} objects
+ */
+function findVisionCandidates(node, candidates = []) {
+  if (VISION_CANDIDATE_ROLES.has(node.role) && node.ref) {
+    candidates.push({
+      role: node.role,
+      name: node.name || null,
+      ref: node.ref,
+    });
+  }
+  for (const child of node.children || []) {
+    findVisionCandidates(child, candidates);
+  }
+  return candidates;
+}
+
+/**
+ * Format vision candidates hint for snapshot response
+ * @param {Array} candidates - Array of vision candidate objects
+ * @returns {string|null} Formatted hint or null if no candidates
+ */
+function formatVisionCandidatesHint(candidates) {
+  if (!candidates || candidates.length === 0) {
+    return null;
+  }
+
+  const lines = ['**Vision analysis available:** The following elements may contain visual content not captured in the accessibility tree:'];
+  for (const c of candidates.slice(0, 5)) { // Limit to first 5
+    const name = c.name ? ` "${c.name}"` : '';
+    lines.push(`- \`${c.role}${name}\` [ref=${c.ref}] → use \`browser_screenshot_snapshot(ref="${c.ref}")\``);
+  }
+  if (candidates.length > 5) {
+    lines.push(`- ... and ${candidates.length - 5} more`);
+  }
+  return lines.join('\n');
+}
+
 // Our new tool schemas
 const NEW_TOOLS = [
   getImageSchema,
@@ -1233,6 +1281,13 @@ Example:
       response += `\n\n**Note:** Some content was truncated (indicated by ▶). To see more:\n${hints.join('\n')}`;
     }
 
+    // Check for vision analysis candidates (img, canvas, etc.)
+    const visionCandidates = findVisionCandidates(tree);
+    const visionHint = formatVisionCandidatesHint(visionCandidates);
+    if (visionHint) {
+      response += `\n\n${visionHint}`;
+    }
+
     return {
       content: [{
         type: 'text',
@@ -1320,6 +1375,14 @@ Example:
       }
 
       responseText += `\n\n**Note:** Some content was truncated. To see more:\n${hints.join('\n')}`;
+    }
+
+    // Check for vision analysis candidates (img, canvas, etc.)
+    const tree = parseSnapshot(filteredYaml);
+    const visionCandidates = findVisionCandidates(tree);
+    const visionHint = formatVisionCandidatesHint(visionCandidates);
+    if (visionHint) {
+      responseText += `\n\n${visionHint}`;
     }
 
     // Replace the YAML in the original response with filtered version
@@ -1785,40 +1848,64 @@ To download this image manually, use browser_navigate to go to the URL.`;
       };
     }
 
-    // Use browser_evaluate to get bounding rect
-    const evalResult = await this._inner.callTool('browser_evaluate', {
-      ref,
-      element: 'target element',
-      function: `(element) => {
-        const rect = element.getBoundingClientRect();
-        return {
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
-          centerX: rect.x + rect.width / 2,
-          centerY: rect.y + rect.height / 2
-        };
-      }`,
-    });
-
-    // Parse the result
-    const resultText = this._extractTextFromResult(evalResult);
-    if (!resultText) {
-      return {
-        content: [{ type: 'text', text: 'Failed to evaluate element bounds' }],
-        isError: true,
-      };
-    }
-
     let bounds;
-    try {
-      bounds = JSON.parse(resultText);
-    } catch {
-      return {
-        content: [{ type: 'text', text: `Invalid response from browser: ${resultText}` }],
-        isError: true,
+
+    // Check if this is a vision ref (v1, v2, etc.)
+    if (isVisionRef(ref)) {
+      const page = await this._getActivePage();
+      const pageId = this._getPageId(page);
+      const cachedBounds = this._visionRefCache.getBounds(pageId, ref);
+
+      if (!cachedBounds) {
+        return {
+          content: [{ type: 'text', text: `Vision ref ${ref} not found or expired. Take a new screenshot_snapshot to get fresh refs.` }],
+          isError: true,
+        };
+      }
+
+      bounds = {
+        x: cachedBounds.x,
+        y: cachedBounds.y,
+        width: cachedBounds.width,
+        height: cachedBounds.height,
+        centerX: cachedBounds.x + cachedBounds.width / 2,
+        centerY: cachedBounds.y + cachedBounds.height / 2,
       };
+    } else {
+      // DOM ref - use browser_evaluate to get bounding rect
+      const evalResult = await this._inner.callTool('browser_evaluate', {
+        ref,
+        element: 'target element',
+        function: `(element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+            centerX: rect.x + rect.width / 2,
+            centerY: rect.y + rect.height / 2
+          };
+        }`,
+      });
+
+      // Parse the result
+      const resultText = this._extractTextFromResult(evalResult);
+      if (!resultText) {
+        return {
+          content: [{ type: 'text', text: 'Failed to evaluate element bounds' }],
+          isError: true,
+        };
+      }
+
+      try {
+        bounds = JSON.parse(resultText);
+      } catch {
+        return {
+          content: [{ type: 'text', text: `Invalid response from browser: ${resultText}` }],
+          isError: true,
+        };
+      }
     }
 
     return {
@@ -2554,11 +2641,29 @@ Try a more specific description or ensure the element is visible in the screensh
    * Handle browser_screenshot_snapshot tool
    * Takes screenshot, sends to Gemini for analysis, returns accessibility tree with v-refs
    *
-   * @param {Object} args - { description?: string }
+   * @param {Object} args - { ref: string, description?: string }
    * @returns {Promise<Object>} MCP response with YAML tree or error
    */
   async _handleScreenshotSnapshot(args) {
-    const { description } = args;
+    const { description, ref } = args;
+
+    // Check for required ref parameter
+    if (!ref) {
+      return {
+        content: [{
+          type: 'text',
+          text: `browser_screenshot_snapshot requires a ref parameter specifying the element to analyze.
+
+This tool should only be used on:
+- img elements (charts, graphs, diagrams)
+- canvas elements (games, graphics apps)
+- Cases where browser_snapshot's accessibility tree is insufficient
+
+Use browser_snapshot first to get element refs, then call this tool with ref="e123" for the specific img or canvas element.`,
+        }],
+        isError: true,
+      };
+    }
 
     // Check for GEMINI_API_KEY
     if (!process.env.GEMINI_API_KEY) {
@@ -2577,8 +2682,36 @@ Then set it:
     }
 
     try {
-      // Take screenshot using existing mechanism
-      const screenshotResult = await this._inner.callTool('browser_take_screenshot', {});
+      // Get page info early for ref resolution
+      const page = await this._getActivePage();
+      const pageId = this._getPageId(page);
+
+      // Resolve ref to bounds for cropping
+      let cropBounds = null;  // For vision refs only - DOM refs use native element screenshot
+      let screenshotResult;
+
+      if (isVisionRef(ref)) {
+        // Vision ref (v1, v2, ...) - lookup in cache for cropping
+        cropBounds = this._visionRefCache.getBounds(pageId, ref);
+        if (!cropBounds) {
+          return {
+            content: [{
+              type: 'text',
+              text: `Vision ref "${ref}" not found or expired. Run browser_screenshot_snapshot to get fresh refs.`,
+            }],
+            isError: true,
+          };
+        }
+        // Take full screenshot - Python script will crop it
+        screenshotResult = await this._inner.callTool('browser_take_screenshot', {});
+      } else {
+        // DOM ref (e123) - use Playwright's native element screenshot
+        // This automatically crops to the element bounds
+        screenshotResult = await this._inner.callTool('browser_take_screenshot', {
+          ref,
+          element: 'target element',
+        });
+      }
 
       // Extract screenshot path from result
       let screenshotPath = null;
@@ -2615,9 +2748,7 @@ Then set it:
         };
       }
 
-      // Get page info for cache scoping and deviceScaleFactor
-      const page = await this._getActivePage();
-      const pageId = this._getPageId(page);
+      // Get deviceScaleFactor (page and pageId already retrieved above)
       const deviceScaleFactor = await page.evaluate(() => window.devicePixelRatio) || 1;
 
       // Clear existing vision refs for this page
@@ -2630,6 +2761,15 @@ Then set it:
       const scriptArgs = [screenshotPath, '--annotate'];
       if (description) {
         scriptArgs.push(`--hint=${description}`);
+      }
+
+      // For vision refs, pass crop bounds to Python (in image pixels)
+      if (cropBounds) {
+        const cropX = Math.round(cropBounds.x * deviceScaleFactor);
+        const cropY = Math.round(cropBounds.y * deviceScaleFactor);
+        const cropW = Math.round(cropBounds.width * deviceScaleFactor);
+        const cropH = Math.round(cropBounds.height * deviceScaleFactor);
+        scriptArgs.push(`--crop=${cropX},${cropY},${cropW},${cropH}`);
       }
 
       // Run Python script via uv
@@ -2652,6 +2792,9 @@ Then set it:
 
       // Assign v-refs post-hoc
       assignRefs(result.elements);
+
+      // Note: Crop offset is now handled by Python script via --crop argument
+      // The coordinates returned from Python are already in absolute page coordinates
 
       // Serve screenshot via localhost (for potential cropping later)
       const server = await this._ensureLocalhostServer();

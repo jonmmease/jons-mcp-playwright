@@ -58,12 +58,12 @@ SYSTEM_PROMPT = """You are an accessibility tree generator. Analyze screenshots 
 
 ## Coordinate System
 - Origin: (0, 0) is the TOP-LEFT corner of the image
-- Format: [y_min, x_min, y_max, x_max] in PIXELS
-- y_min: Top edge (smaller y value)
-- y_max: Bottom edge (larger y value)
-- x_min: Left edge (smaller x value)
-- x_max: Right edge (larger x value)
-- All values are integers
+- Format: [y_min, x_min, y_max, x_max] as NORMALIZED integers from 0-1000
+- y_min: Top edge (smaller y value, 0 = top of image)
+- y_max: Bottom edge (larger y value, 1000 = bottom of image)
+- x_min: Left edge (smaller x value, 0 = left of image)
+- x_max: Right edge (larger x value, 1000 = right of image)
+- All values are integers between 0 and 1000
 
 ## Role Selection
 Use ONLY roles from the provided schema enum. Common roles:
@@ -270,8 +270,65 @@ def draw_annotations(image_path, elements, output_path):
     return output_path
 
 
+def convert_normalized_to_pixels(el, width, height):
+    """Convert Gemini's normalized 0-1000 coordinates to absolute pixels.
+
+    Gemini returns bounding boxes in normalized coordinates where:
+    - Values range from 0 to 1000
+    - Must be scaled to actual image dimensions
+
+    Args:
+        el: Element with bounding_box in normalized coordinates
+        width: Image width in pixels
+        height: Image height in pixels
+    """
+    bbox = el.get('bounding_box', [])
+    if len(bbox) != 4:
+        return
+
+    y_min, x_min, y_max, x_max = bbox
+
+    # Convert from 0-1000 normalized to absolute pixels
+    el['bounding_box'] = [
+        int(y_min / 1000 * height),
+        int(x_min / 1000 * width),
+        int(y_max / 1000 * height),
+        int(x_max / 1000 * width)
+    ]
+
+    # Recurse to children
+    for child in el.get('children', []):
+        convert_normalized_to_pixels(child, width, height)
+
+
+def add_crop_offset(el, offset_x, offset_y):
+    """Add crop offset to element coordinates to convert to absolute page coordinates.
+
+    When analyzing a cropped region, Gemini returns coordinates relative to the crop.
+    This function adds the crop offset to convert back to absolute page coordinates.
+
+    Args:
+        el: Element with bounding_box in crop-relative pixels
+        offset_x: X offset of crop region (pixels)
+        offset_y: Y offset of crop region (pixels)
+    """
+    bbox = el.get('bounding_box', [])
+    if len(bbox) == 4:
+        y_min, x_min, y_max, x_max = bbox
+        el['bounding_box'] = [
+            y_min + offset_y,
+            x_min + offset_x,
+            y_max + offset_y,
+            x_max + offset_x
+        ]
+
+    # Recurse to children
+    for child in el.get('children', []):
+        add_crop_offset(child, offset_x, offset_y)
+
+
 def validate_element(el, width, height, errors, path="root"):
-    """Validate and clamp bounding boxes."""
+    """Validate and clamp bounding boxes (after coordinate conversion)."""
     bbox = el.get('bounding_box', [])
     if len(bbox) != 4:
         errors.append(f"{path}: invalid bounding_box length")
@@ -309,7 +366,21 @@ def main():
     parser.add_argument("--model", default=MODEL, help=f"Gemini model to use (default: {MODEL})")
     parser.add_argument("--annotate", action="store_true",
                        help="Generate annotated image with bounding box overlays")
+    parser.add_argument("--crop", help="Crop region as x,y,width,height in pixels (for vision ref cropping)")
     args = parser.parse_args()
+
+    # Parse crop bounds if provided
+    crop_offset = None  # Will be (x, y) tuple if cropping
+    if args.crop:
+        try:
+            crop_x, crop_y, crop_w, crop_h = map(int, args.crop.split(','))
+            crop_offset = (crop_x, crop_y)
+        except ValueError:
+            print(json.dumps({
+                "error": f"Invalid crop format: {args.crop}. Expected x,y,width,height",
+                "error_code": "invalid_crop"
+            }))
+            sys.exit(1)
 
     # Check for API key
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -334,9 +405,20 @@ def main():
 
         # Load image and get dimensions
         image = Image.open(args.image_path)
+
+        # Crop image if --crop was provided
+        if args.crop:
+            crop_x, crop_y, crop_w, crop_h = map(int, args.crop.split(','))
+            # PIL crop uses (left, upper, right, lower) format
+            image = image.crop((crop_x, crop_y, crop_x + crop_w, crop_y + crop_h))
+            # Save cropped image to temp file for API and annotated output
+            cropped_path = Path(args.image_path).parent / f"cropped_{Path(args.image_path).name}"
+            image.save(str(cropped_path), 'PNG')
+            args.image_path = str(cropped_path)  # Update path for annotated image output
+
         width, height = image.size
 
-        # Read image bytes for API
+        # Read image bytes for API (use cropped if applicable)
         with open(args.image_path, "rb") as f:
             image_bytes = f.read()
 
@@ -350,7 +432,7 @@ For each element:
 2. Provide a descriptive name:
    - For text elements (paragraph, label, heading, code): include the complete text verbatim
    - For other elements: a concise description for screen reader announcement
-3. Specify bounding box as [y_min, x_min, y_max, x_max] in pixels
+3. Specify bounding box as [y_min, x_min, y_max, x_max] using normalized 0-1000 coordinates
 
 Structure hierarchically (up to 5 levels) based on visual containment.
 Focus on elements useful for automation and data extraction."""
@@ -388,6 +470,16 @@ Focus on elements useful for automation and data extraction."""
 
         # Parse response
         tree = json.loads(response.text)
+
+        # Convert normalized 0-1000 coordinates to absolute pixels
+        for el in tree.get('elements', []):
+            convert_normalized_to_pixels(el, width, height)
+
+        # If cropped, add crop offset to convert to absolute page coordinates
+        if crop_offset:
+            offset_x, offset_y = crop_offset
+            for el in tree.get('elements', []):
+                add_crop_offset(el, offset_x, offset_y)
 
         # Validate and clamp bounding boxes
         errors = []

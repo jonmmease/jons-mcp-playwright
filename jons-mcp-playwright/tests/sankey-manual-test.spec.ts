@@ -15,15 +15,21 @@ test('analyze sankey diagram', async ({ startClient }) => {
 
   // Navigate to local HTML file
   const htmlPath = path.join(__dirname, 'fixtures', 'sankey-test.html');
-  await client.callTool({
+  const navResponse = await client.callTool({
     name: 'browser_navigate',
     arguments: { url: `file://${htmlPath}` },
   });
 
-  // Run screenshot snapshot
+  // Get ref for the img element
+  const navText = navResponse.content?.[0]?.text || '';
+  const imgRefMatch = navText.match(/img.*\[ref=(e\d+)\]/i) || navText.match(/\[ref=(e\d+)\].*img/i);
+  const anyRefMatch = navText.match(/\[ref=(e\d+)\]/);
+  const imgRef = imgRefMatch ? imgRefMatch[1] : (anyRefMatch ? anyRefMatch[1] : 'e1');
+
+  // Run screenshot snapshot on the img element
   const response = await client.callTool({
     name: 'browser_screenshot_snapshot',
-    arguments: { description: 'A sankey diagram showing flow between categories' },
+    arguments: { ref: imgRef, description: 'A sankey diagram showing flow between categories' },
   });
 
   expect(response.isError).toBeFalsy();

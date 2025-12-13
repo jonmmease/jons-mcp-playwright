@@ -12,7 +12,14 @@
 
 export const schema = {
   name: 'browser_screenshot_snapshot',
-  description: `Analyze the current page screenshot using vision AI to generate an accessibility tree with bounding boxes.
+  description: `Analyze a specific element using vision AI to generate an accessibility tree with bounding boxes.
+
+**IMPORTANT**: This tool should only be used on:
+- img elements (charts, graphs, diagrams, infographics)
+- canvas elements (games, graphics apps, interactive visualizations)
+- Cases where you have verified that browser_snapshot's accessibility tree is insufficient
+
+Do NOT use this on entire pages or generic containers - use browser_snapshot instead.
 
 Returns a hierarchical structure of visual elements with refs (v1, v2, ...) that can be used with:
 - browser_click(ref="v1") - click on a vision-detected element
@@ -24,12 +31,6 @@ Returns a hierarchical structure of visual elements with refs (v1, v2, ...) that
 **WARNING**: This tool sends screenshots to Google's Gemini API for analysis.
 Do not use on pages containing sensitive information.
 
-Use this tool when:
-- Working with charts, graphs, or data visualizations
-- The page uses canvas rendering (games, graphics apps)
-- Standard browser_snapshot doesn't show needed elements
-- You need to interact with visual elements without DOM representation
-
 Vision refs (v1, v2, ...) are ephemeral - they expire after the configured TTL (default: 30s).
 Taking a new screenshot_snapshot invalidates previous refs.
 
@@ -39,11 +40,15 @@ Requires:
   inputSchema: {
     type: 'object',
     properties: {
+      ref: {
+        type: 'string',
+        description: 'Element ref (DOM ref like "e123" or vision ref like "v1") specifying the element to analyze. The screenshot is cropped to the element\'s bounding box before analysis. Should typically be an img or canvas element. Bounding boxes in the response are returned in absolute page coordinates.',
+      },
       description: {
         type: 'string',
         description: 'Optional hint about the content (e.g., "This is a bar chart showing quarterly sales", "This is a flowchart diagram"). Helps Gemini produce more accurate results.',
       },
     },
-    required: [],
+    required: ['ref'],
   },
 };
